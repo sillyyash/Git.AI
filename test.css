@@ -1,0 +1,36 @@
+@import url("theme.css");
+
+:root{
+
+    --primary:#00ff88;
+
+    --secondary:#111;
+}
+
+body{
+
+}
+
+.container{
+
+}
+
+#login{
+
+}
+
+.card:hover{
+
+}
+
+button.primary{
+
+}
+
+@keyframes fade{
+
+}
+
+@media (max-width:768px){
+
+}

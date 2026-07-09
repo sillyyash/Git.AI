@@ -1,0 +1,83 @@
+{
+  "context_summary": {
+    "component_count": 1,
+    "definition_count": 1,
+    "estimated_context_tokens": 81,
+    "owner_count": 1,
+    "reference_count": 0,
+    "related_file_count": 1,
+    "summary": {
+      "architecture": "Unknown",
+      "architecture_confidence": 0.0,
+      "build": null,
+      "components": [],
+      "deployment": null,
+      "entry_points": [
+        "app.py"
+      ],
+      "framework": "Flask",
+      "framework_confidence": 0.9,
+      "framework_evidence": [
+        "app.py"
+      ],
+      "language": "python",
+      "major_features": [],
+      "package_manager": null,
+      "routes": [],
+      "test_framework": null
+    },
+    "symbol_count": 1
+  },
+  "model_config": {
+    "base_url": "http://localhost:11434",
+    "max_tokens": 1024,
+    "model": "test-model",
+    "temperature": 0.7
+  },
+  "model_stats": {
+    "tokens_input": 10
+  },
+  "prompt_mode": "coder",
+  "prompt_output_format": "text",
+  "prompt_stats": {
+    "estimated_tokens": 323,
+    "length_chars": 1294,
+    "length_lines": 56,
+    "mode": "coder",
+    "output_format": "text"
+  },
+  "query_history": [
+    "search_symbol",
+    "find_definitions",
+    "find_references",
+    "find_owner",
+    "find_component",
+    "dependency_tree",
+    "impact_analysis",
+    "find_related_files",
+    "summarize_repository"
+  ],
+  "repository_profile": {
+    "architecture": "Unknown",
+    "architecture_confidence": 0.0,
+    "build": null,
+    "components": [],
+    "deployment": null,
+    "entry_points": [
+      "app.py"
+    ],
+    "framework": "Flask",
+    "framework_confidence": 0.9,
+    "framework_evidence": [
+      "app.py"
+    ],
+    "language": "python",
+    "major_features": [],
+    "package_manager": null,
+    "routes": [],
+    "test_framework": null
+  },
+  "request": "Rename the login handler",
+  "response": "response text",
+  "timestamp": "2026-07-09T18:21:11.895559+00:00"
+}

@@ -1,0 +1,3 @@
+beautifulsoup4
+tree_sitter
+tree_sitter_javascript
