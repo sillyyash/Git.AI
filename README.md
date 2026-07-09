@@ -1,9 +1,35 @@
 AutoDevAI Development Log – Day 1
-1. Designed the project architecture
+Current Architecture
+                  AutoDevAI
+                       │
+                       ▼
+            Repository Scanner
+                       │
+                       ▼
+            Language Detection
+                       │
+                       ▼
+       Language-specific Parsers
+     (Python / JavaScript / HTML / CSS)
+                       │
+                       ▼
+            Repository Indexer
+                       │
+                       ▼
+             Dependency Graph
+                       │
+                       ▼
+          Repository Inspector
+                       │
+                       ▼
+              Ollama AI Engine
+What We Built Today
+1. Designed the Core Architecture ⭐⭐⭐⭐⭐
 
-Instead of writing one large script, I designed AutoDevAI as a modular system.
+Before writing any code, the entire project was designed as a modular system instead of a monolithic script.
 
 AutoDevAI/
+│
 ├── core/
 │   ├── repository.py
 │   ├── indexer.py
@@ -12,29 +38,26 @@ AutoDevAI/
 │   └── ai.py
 │
 ├── agent/
-│
 ├── prompts/
-│
 ├── repos/
-│
 ├── logs/
-│
 └── main.py
 
-Each module has one responsibility, making the system scalable and maintainable.
+Each module was given a single responsibility, allowing every future feature to plug into the architecture without requiring major refactoring.
 
-2. Built a Repository Scanner
+2. Built the Repository Scanner ✅
 
-Created a scanner that recursively walks through an entire project.
+Created the first stage of the pipeline capable of recursively scanning an entire repository.
 
-It automatically:
+The scanner automatically:
 
-discovers every file
-detects programming language
-reads file contents
-stores metadata
+Discovers every file
+Detects programming language
+Reads file contents
+Stores metadata
+Preserves directory structure
 
-Example:
+Example
 
 Website/
 
@@ -44,60 +67,58 @@ script.js
 auth.py
 README.md
 
-↓
+        │
+        ▼
 
-becomes
-
-Repository
+Repository Object
 
 Files
-
-Language
-
+Languages
 Contents
+Paths
 
-Path
+This became the raw knowledge source for every later stage.
 
-This is the raw knowledge base for the AI.
+3. Built the Repository Indexer ⭐⭐⭐⭐
 
-3. Built a Repository Indexer
+The Repository Scanner only reads files.
 
-The scanner only reads files.
-
-The Indexer understands them.
+The Repository Indexer understands them.
 
 For every file it extracts:
 
-file size
-line count
-imports
-functions
-classes
-exports
+File size
+Line count
+Imports
+Functions
+Classes
+Exports
 
-Then stores everything inside structured Python dataclasses.
+Everything is stored inside structured Python dataclasses instead of loose dictionaries.
 
-4. Built language-specific parsers
+This created the project's first searchable repository database.
 
-Instead of treating every file as text, I created dedicated parsers.
+4. Built Language-specific Parsers ⭐⭐⭐⭐⭐
+
+Instead of treating repositories as plain text, AutoDevAI gained dedicated parsers for each supported language.
 
 Python Parser
 
-Finds
+Extracts
 
-imports
-functions
-classes
+Imports
+Functions
+Classes
 JavaScript Parser
 
-Finds
+Extracts
 
-imports
-exports
-functions
-classes
+Imports
+Exports
+Functions
+Classes
 
-Supports:
+Supports
 
 JavaScript
 TypeScript
@@ -105,289 +126,238 @@ React JSX
 React TSX
 HTML Parser
 
-Parses:
+Parses
 
 HTML
-embedded CSS
-embedded JavaScript
+Embedded CSS
+Embedded JavaScript
 
 Extracts
 
-imports
-JavaScript functions
-HTML elements
+HTML Elements
 IDs
-CSS classes
+CSS Classes
+JavaScript Functions
+Imports
 
-This allows AutoDevAI to understand single-file web pages.
+This allowed AutoDevAI to understand complete single-page websites.
 
 CSS Parser
 
 Extracts
 
-selectors
-CSS variables
-animations
-media queries
+Selectors
+CSS Variables
+Animations
+Media Queries
 IDs
-classes
-
-Preparing the AI to reason about styling relationships.
-
-5. Built common parser utilities
-
-Instead of repeating code in every parser, I centralized shared metadata creation.
-
-Every parser now returns the same data structure.
-
-This keeps the architecture consistent.
-
-6. Built the Repository Graph
-
-This is the biggest architectural milestone.
-
-Instead of storing isolated files, the system now builds relationships.
-
-It creates indexes for:
-
-Functions
-
-↓
-
-File
-
 Classes
 
-↓
+Preparing the foundation for future styling intelligence.
 
-File
+5. Built Shared Parser Utilities
 
-Selectors
+Rather than duplicating metadata logic across four parsers, a common parser utility layer was introduced.
 
-↓
+Every parser now returns a consistent metadata schema, making downstream indexing and graph construction language-agnostic.
 
-File
+6. Built the Repository Graph ⭐⭐⭐⭐⭐
 
-Variables
+This marked the transition from isolated files to interconnected repository knowledge.
 
-↓
+Instead of storing symbols independently, AutoDevAI created indexes such as:
 
-File
+Function
+     │
+     ▼
+   File
 
-Imports
+Class
+     │
+     ▼
+   File
 
-↓
+Selector
+     │
+     ▼
+   File
 
-File
+Variable
+     │
+     ▼
+   File
 
-Reverse Imports
+Import
+     │
+     ▼
+   File
 
-↓
+Reverse indexes were also introduced, allowing instant lookup of files referencing any symbol.
 
-Files using it
+7. Built the Dependency Graph ⭐⭐⭐⭐
 
-This allows instant lookups without AI.
+On top of the Repository Graph, a Dependency Graph was created.
 
-7. Built a Dependency Graph
-
-Created graph utilities capable of answering questions like
+It can answer questions like:
 
 Which file defines this function?
-
 Which files import this module?
+Where is this class defined?
+Which files depend on this module?
 
-Where is this class located?
+All through graph traversal—without requiring an LLM.
 
-using simple graph lookups.
+8. Fixed Duplicate Graph Relationships ✅
 
-No LLM required.
-
-8. Fixed duplicate relationship bug
-
-Found and corrected a graph issue where repeated HTML elements produced duplicate graph edges.
-
-Example
+Discovered and resolved duplicate graph edges caused by repeated HTML elements.
 
 Before
 
 div
-
-↓
-
-index.html
-
-↓
-
-index.html
-
-↓
-
-index.html
+ │
+ ├── index.html
+ ├── index.html
+ └── index.html
 
 After
 
 div
+ │
+ └── index.html
 
-↓
+The graph now stores only unique relationships.
 
-index.html
+9. Built the Repository Inspector ⭐⭐⭐⭐
 
-The graph now stores unique relationships.
+Created a professional inspection dashboard instead of dumping raw Python objects.
 
-9. Built a Repository Inspector
-
-Instead of printing raw Python objects, I created a professional debugging dashboard.
-
-It reports
+It reports:
 
 Repository Summary
-
-total files
-total lines
-total size
-language breakdown
-
+Total files
+Total lines
+Total size
+Language distribution
 Graph Summary
-
-functions
-classes
-selectors
-variables
-imports
-graph nodes
-graph edges
-
-Indexes
-
-function index
-class index
-selector index
+Functions
+Classes
+Selectors
+Variables
+Imports
+Graph nodes
+Graph edges
+Repository Indexes
+Function Index
+Class Index
+Selector Index
 HTML IDs
-CSS variables
-animations
-import graph
-reverse import graph
+CSS Variables
+Animations
+Import Graph
+Reverse Import Graph
 
-Query demonstrations
+It also demonstrates live graph queries to verify correctness.
 
-showing that graph lookups work correctly.
+10. Connected the Local AI ⭐⭐⭐⭐
 
-10. Connected the AI
-
-Connected Python to a locally running Ollama server.
-
-Architecture
+Integrated AutoDevAI with a locally running Ollama server.
 
 Python
 
-↓
+    │
+
+    ▼
 
 Ollama HTTP API
 
-↓
+    │
+
+    ▼
 
 Qwen2.5-Coder 14B
 
-↓
+    │
+
+    ▼
 
 AI Response
 
-The AI can now be called programmatically instead of manually chatting with it.
+For the first time, AutoDevAI could send repository context directly to a local coding model.
 
-This becomes the reasoning engine of AutoDevAI.
+What This Means
 
-Current Architecture
-                AutoDevAI
+At the beginning of Day 1, AutoDevAI was only an idea.
 
-                      │
-                      ▼
-          Repository Scanner
-                      │
-                      ▼
-          Language Detection
-                      │
-                      ▼
-         Language-specific Parsers
-     (Python / JS / HTML / CSS)
-                      │
-                      ▼
-          Repository Indexer
-                      │
-                      ▼
-          Dependency Graph
-                      │
-                      ▼
-        Repository Inspector
-                      │
-                      ▼
-             Ollama AI Engine
-What this means
+By the end of the day, it could:
 
-At the start of today, AutoDevAI could only ask an AI a question.
+Scan complete repositories
+Understand multiple programming languages
+Extract repository structure
+Build searchable indexes
+Construct dependency graphs
+Query repository knowledge without AI
+Connect to a local LLM for reasoning
+Current Project Status
+Architecture          ██████████ 100%
 
-By the end of today, it can:
+Repository Scanner    ██████████ 100%
 
-Read an entire repository.
-Understand multiple programming languages.
-Extract code structure.
-Build searchable indexes.
-Build dependency relationships.
-Query the codebase without using AI.
-Feed structured context into a local LLM.
-Progress
+Language Parsers      ████████░░  85%
 
-If we think of AutoDevAI as a complete autonomous software engineer:
+Repository Index      ██████████ 100%
 
-Architecture         ██████████ 100%
-Repository Scanner   ██████████ 100%
-Language Parsers     ████████░░  85%
-Repository Index     ██████████ 100%
-Dependency Graph     █████████░  95%
-Repository Inspector ██████████ 100%
-AI Integration       ███████░░░  70%
-Planner Agent        ░░░░░░░░░░   0%
-Coder Agent          ░░░░░░░░░░   0%
-Reviewer Agent       ░░░░░░░░░░   0%
-Relationship Builder ░░░░░░░░░░   0%
-Git Automation       ░░░░░░░░░░   0%
+Dependency Graph      █████████░  95%
 
+Repository Inspector  ██████████ 100%
 
+AI Integration        ███████░░░  70%
+
+Relationship Builder  ░░░░░░░░░░   0%
+
+Query Engine          ░░░░░░░░░░   0%
+
+Planner Agent         ░░░░░░░░░░   0%
+
+Coder Agent           ░░░░░░░░░░   0%
+
+Reviewer Agent        ░░░░░░░░░░   0%
+
+Git Automation        ░░░░░░░░░░   0%
 AutoDevAI Development Log – Day 2
-
 Current Architecture
-                     AutoDevAI
-                          │
-                          ▼
-                Repository Scanner
-                          │
-                          ▼
-               Language Detection
-                          │
-                          ▼
-            Language-specific Parsers
-      (Python / JavaScript / HTML / CSS)
-                          │
-                          ▼
-               Repository Indexer
-                          │
-                          ▼
-                Dependency Graph
-                          │
-                          ▼
-              Relationship Builder   ⭐ NEW
-                          │
-                          ▼
-                  Query Engine        ⭐ NEW
-                          │
-                          ▼
-              Repository Inspector
-                          │
-                          ▼
-                 Ollama AI Engine
+                  AutoDevAI
+                       │
+                       ▼
+            Repository Scanner
+                       │
+                       ▼
+           Language Detection
+                       │
+                       ▼
+      Language-specific Parsers
+   (Python / JavaScript / HTML / CSS)
+                       │
+                       ▼
+           Repository Indexer
+                       │
+                       ▼
+            Dependency Graph
+                       │
+                       ▼
+         Relationship Builder ⭐ NEW
+                       │
+                       ▼
+             Query Engine ⭐ NEW
+                       │
+                       ▼
+         Repository Inspector
+                       │
+                       ▼
+            Ollama AI Engine
 What We Built Today
-1. Fixed the entire HTML metadata pipeline ✅
+1. Rebuilt the HTML & CSS Metadata Pipeline ⭐⭐⭐⭐⭐
 
-At the beginning of today your inspector looked like this:
+At the start of the day, the Repository Inspector reported:
 
 Selectors      : 0
 IDs            : 0
@@ -397,338 +367,185 @@ Animations     : 0
 Media Queries  : 0
 Elements       : 0
 
-We traced the bug through the whole pipeline.
+The issue was traced through the entire pipeline.
 
 HTML Parser
-      ↓
-Indexer
-      ↓
+      │
+      ▼
+Repository Index
+      │
+      ▼
 Dependency Graph
-      ↓
+      │
+      ▼
 Inspector
 
-The problem wasn't main.py.
+The problem originated inside the parsers, not the inspector.
 
-It was upstream.
+HTML Parser Improvements
 
-HTML Parser
-
-We upgraded it to extract
+Added extraction for:
 
 HTML Elements
 IDs
 CSS Classes
 External CSS
-External JS
+External JavaScript
 Inline CSS
 Inline JavaScript
+CSS Parser Improvements
 
-instead of only JavaScript.
+Major parser improvements included fixing:
 
-CSS Parser
-
-This became a surprisingly large task.
-
-We fixed
-
-Regex grabbing CSS declarations
-Encoded SVG garbage
-@keyframes parsing
-@media parsing
+Incorrect selector regex
+Encoded SVG parsing
+@keyframes
+@media
 Nested braces
 Comments
 Duplicate selectors
 
-Instead of relying on regex alone we ended up writing a small lexer that walks through the CSS one character at a time.
+The regex-based implementation was replaced with a lightweight lexer that walks the stylesheet character by character, dramatically improving reliability.
 
-That makes the parser much more reliable.
+2. Expanded the Repository Graph ⭐⭐⭐⭐
 
-Metadata Pipeline
-
-Now the pipeline successfully propagates
-
-HTML
-
-↓
-
-elements
-
-↓
-
-Dependency Graph
-
-↓
-
-Inspector
-
-and
-
-CSS
-
-↓
-
-selectors
-variables
-animations
-media queries
-
-↓
-
-Dependency Graph
-
-↓
-
-Inspector
-2. Repository Graph became much richer ✅
+The Repository Graph evolved from storing only functions into a much richer representation.
 
 Before
 
 Functions
-
-↓
-
-Files
+      │
+      ▼
+    Files
 
 Now
 
 Functions
-
 Classes
-
 Selectors
-
 Variables
-
 Animations
-
 Media Queries
-
 HTML Elements
-
 IDs
-
 CSS Classes
+      │
+      ▼
+    Files
 
-↓
+The repository now models far more than executable code.
 
-Files
+3. Built the Relationship Graph ⭐⭐⭐⭐⭐
 
-The graph now understands much more of the repository.
+This became the biggest architectural milestone of Day 2.
 
-3. Built the Relationship Builder ⭐⭐⭐⭐⭐
+Instead of storing only indexes, AutoDevAI began storing semantic relationships.
 
-This was the biggest feature of the day.
-
-Before today the Dependency Graph only answered
-
-Where is this function?
-
-Where is this class?
-
-Which file imports this?
-
-Those are indexes.
-
-Today we built something different.
-
-Relationship Graph
-
-Instead of
-
-Function
-
-↓
-
-File
-
-we now have semantic relationships.
-
-Current relationship types
+Examples include:
 
 HTML Element
-
-↓
-
+      │
 USES_CLASS
-
-↓
-
+      ▼
 CSS Class
 HTML ID
-
-↓
-
-USES_ID
-
-↓
-
-CSS ID
+      │
+ USES_ID
+      ▼
+ CSS ID
 CSS Selector
-
-↓
-
-STYLES
-
-↓
-
-HTML
+      │
+ STYLES
+      ▼
+HTML Element
 File
-
-↓
-
+      │
 IMPORTS
+      ▼
+Module
 
-↓
-
-Module/File
-
-And placeholders for future intelligence
+Future relationship placeholders were also added:
 
 CALLS_FUNCTION
-
 CALLS
-
 REFERENCES
-
 USES_CLASS (JavaScript)
-
 DOM References
 
-These are ready to activate once the parsers become smarter.
+The graph now stores:
 
-RelationshipGraph
-
-We built an entirely new graph.
-
-It stores
-
+Source
 Relationship
+Target
+Source File
+Metadata
 
-source
+allowing semantic reasoning beyond simple indexes.
 
-relation
+4. Upgraded the Repository Inspector ⭐⭐⭐⭐
 
-target
+The inspector now validates Relationship Graph construction.
 
-source_file
+It reports:
 
-Example
+Total relationships
+Relationship counts
+Sample relationships
+Relationship summaries
 
-hero
-
-↓
-
-USES_CLASS
-
-↓
-
-.hero
-
-or
-
-.hero
-
-↓
-
-STYLES
-
-↓
-
-hero
-
-This graph exists alongside the Dependency Graph.
-
-Relationship Queries
-
-It supports
-
-by_source()
-
-by_target()
-
-by_relation()
-
-by_file()
-
-making relationship lookups extremely fast.
-
-4. Relationship Inspector
-
-main.py now prints
-
-Relationship Summary
+Including:
 
 USES_CLASS
-
 USES_ID
-
 STYLES
-
 IMPORTS
-
 CALLS
-
 REFERENCES
-
 CALLS_FUNCTION
 
-along with sample relationships.
-
-This gives immediate visual verification that the graph is correct.
+making relationship debugging straightforward.
 
 5. Built the Public Query Engine ⭐⭐⭐⭐⭐
 
-This is probably the best architectural decision of the day.
+One of the most important architectural decisions of the project.
 
-Instead of future AI agents doing this
+Instead of future AI agents interacting directly with graphs,
 
-DependencyGraph
-
-↓
-
-functions
+Dependency Graph
 
 ↓
 
-selectors
+Relationship Graph
 
 ↓
 
-imports
+Indexes
 
 ↓
 
-relationships
+Manual Traversal
 
-they now call
+they now interact only with:
 
 core/queries.py
 
-Functions include
+Public APIs include:
 
 find_html_for_selector()
-
 find_elements_using_selector()
-
 find_files_using_class()
-
 find_style_chain()
-
 find_functions_called_by()
-
 find_call_chain()
-
 find_import_chain()
-
 find_all_dependencies()
-
 find_related_files()
 
-The Planner will never need to know how the graphs are implemented internally.
+This permanently decouples the AI layer from graph implementation details.
 
-Current Relationship Output
+Repository Output
 
-Your repository now reports
+Current relationship counts:
 
 Total Relationships : 206
 
@@ -740,22 +557,17 @@ CALLS_FUNCTION  : 0
 CALLS           : 0
 REFERENCES      : 0
 
-That is expected.
-
-The remaining zeros are not bugs—they're waiting for richer parser data.
+The remaining zeros were expected—they represented parser capabilities planned for Day 3.
 
 Bugs Solved Today
-
-We fixed several important issues:
-
-✅ HTML parser wasn't exposing elements, IDs, or CSS classes.
-✅ CSS parser wasn't integrated into the HTML parser.
-✅ clean_metadata() failed on lists containing dictionaries.
-✅ Duplicate metadata handling for complex objects.
-✅ CSS selector extraction capturing encoded SVG data and declaration blocks.
-✅ Regex-based parsing replaced with a lexer-based approach for selectors.
-✅ CSS classes renamed consistently (classes → css_classes) across the pipeline.
-✅ Relationship Builder correctly producing STYLES relationships.
+✅ HTML parser now exposes elements, IDs, and CSS classes correctly.
+✅ HTML parser integrates embedded CSS parsing.
+✅ clean_metadata() correctly handles nested dictionaries.
+✅ Duplicate metadata handling fixed.
+✅ CSS selector extraction ignores encoded SVG data.
+✅ Regex selector parsing replaced with a lexer.
+✅ Consistent metadata naming (css_classes).
+✅ Relationship Builder correctly produces STYLES relationships.
 Current Project Status
 Architecture          ██████████ 100%
 
@@ -788,6 +600,7 @@ Coder Agent           ░░░░░░░░░░   0%
 Reviewer Agent        ░░░░░░░░░░   0%
 
 Git Automation        ░░░░░░░░░░   0%
+
 
 # AutoDevAI Development Log – Day 3
 
