@@ -15,7 +15,8 @@ Pipeline:
 
 from __future__ import annotations
 
-from typing import Optional, Dict, List, Any
+import os
+from typing import Optional, Dict, List, Any, Tuple
 import json
 from datetime import datetime
 
@@ -34,6 +35,12 @@ from agents.planner_prompts import get_system_prompt
 
 # Import only the public API - never import graph modules directly
 from core import queries
+
+# Reuse the same keyword extraction used by context_builder.py rather than
+# re-implementing (and under-filtering) it here. This is the same stopword
+# list / tokenization that seeds prompt context, so "add", "the", "fix" etc.
+# never reach queries.search_symbol as noise queries.
+from core.context_builder import _extract_keywords
 
 
 # ---------------------------------------------------------------------------
@@ -111,14 +118,18 @@ def analyze_impact(
     affected_symbols: List[Symbol] = []
     affected_files: List[str] = []
     dependencies: Dict[str, List[str]] = {}
-    
-    # Extract potential symbol names from request
-    # This is heuristic-based (not LLM) to avoid model calls in planner
-    import re
-    potential_symbols = re.findall(r'\b[a-zA-Z_]\w*\b', request)
-    
+
+    # BUG FIX: this used to be
+    #   re.findall(r'\b[a-zA-Z_]\w*\b', request)
+    # which had zero stopword filtering, so every request fired a
+    # search_symbol() call for "add", "the", "fix", "and", "for", etc.
+    # _extract_keywords() already does tokenization + stopword removal +
+    # dedup (it's the same helper context_builder.py uses to seed prompt
+    # context), so reuse it instead of duplicating weaker logic here.
+    potential_symbols = _extract_keywords(request)
+
     # Search repository for mentioned symbols
-    for symbol_name in set(potential_symbols):
+    for symbol_name in potential_symbols:
         if len(symbol_name) < 3:
             continue
         
@@ -165,29 +176,71 @@ def analyze_impact(
 # Phase 4: Risk Assessment
 # ---------------------------------------------------------------------------
 
+def _is_critical_path_file(file_path: str) -> bool:
+    """Return True only if a path SEGMENT or filename STEM matches a critical
+    keyword - not a raw substring of the whole path.
+
+    BUG FIX: the old version did
+        any(keyword in f.lower() for keyword in ["main", "entry", "index", "app", "server"])
+    which false-positives on things like 'user_index.py', 'app_config.py',
+    'apparel.py', 'mainframe_utils.py'. Comparing against path segments and
+    the filename stem (without extension) avoids that.
+    """
+    critical_keywords = {"main", "entry", "index", "app", "server"}
+
+    normalized = file_path.replace("\\", "/").lower()
+    segments = [s for s in normalized.split("/") if s]
+
+    if not segments:
+        return False
+
+    filename = segments[-1]
+    stem = os.path.splitext(filename)[0]
+
+    # directory segment exactly named one of the keywords (e.g. "app/", "server/")
+    if any(segment in critical_keywords for segment in segments[:-1]):
+        return True
+
+    # filename stem exactly matches (e.g. "main.py", "index.js", "server.py")
+    # or is keyword + separator (e.g. "app_config" no, but "app.py" yes,
+    # "main_router.py" yes since it starts with "main_")
+    for keyword in critical_keywords:
+        if stem == keyword:
+            return True
+        if stem.startswith(f"{keyword}_") or stem.startswith(f"{keyword}."):
+            return True
+
+    return False
+
+
 def assess_risk(
     intent: Intent,
     affected_symbols: List[Symbol],
     affected_files: List[str],
     dependencies: Dict[str, List[str]],
     repo_profile: Dict[str, Any],
-) -> Risk:
+) -> Tuple[Risk, Dict[str, Any]]:
     """Assess operation risk using heuristics.
     
     Args:
-        intent: Classified intent
+        intent: The classified intent
         affected_symbols: Affected code symbols
         affected_files: Affected files
         dependencies: Dependency map
         repo_profile: Repository profile
         
     Returns:
-        Risk level assessment
+        Tuple of (Risk level assessment, metrics dict used to compute it).
+
+        The metrics dict is returned (not just the enum) so callers like
+        create_plan() can report the *actual* computed values in reasoning
+        text instead of hardcoding placeholder strings.
     """
     # Calculate metrics
     file_count = len(affected_files)
     symbol_count = len(affected_symbols)
     dependency_count = sum(len(deps) for deps in dependencies.values())
+    max_dependency_depth = max((len(deps) for deps in dependencies.values()), default=0)
     
     # Estimate test coverage (heuristic)
     has_test_coverage = any(
@@ -195,12 +248,9 @@ def assess_risk(
     )
     
     # Check if in critical path (heuristic: entry points, main files)
-    is_critical_path = any(
-        any(keyword in f.lower() for keyword in ["main", "entry", "index", "app", "server"])
-        for f in affected_files
-    )
-    
-    return estimate_risk(
+    is_critical_path = any(_is_critical_path_file(f) for f in affected_files)
+
+    risk = estimate_risk(
         intent=intent,
         affected_file_count=file_count,
         affected_symbol_count=symbol_count,
@@ -208,6 +258,24 @@ def assess_risk(
         has_test_coverage=has_test_coverage,
         is_critical_path=is_critical_path,
     )
+
+    if dependency_count > 20 or max_dependency_depth > 10:
+        dependency_complexity = "high"
+    elif dependency_count > 5 or max_dependency_depth > 3:
+        dependency_complexity = "medium"
+    else:
+        dependency_complexity = "low"
+
+    metrics = {
+        "file_count": file_count,
+        "symbol_count": symbol_count,
+        "dependency_count": dependency_count,
+        "has_test_coverage": has_test_coverage,
+        "is_critical_path": is_critical_path,
+        "dependency_complexity": dependency_complexity,
+    }
+
+    return risk, metrics
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +615,10 @@ def create_plan(
     )
     
     # Phase 4: Assess risk
-    risk = assess_risk(
+    # BUG FIX: assess_risk now returns (risk, metrics) instead of just risk,
+    # so the reasoning text below can report the real computed values
+    # instead of the old hardcoded "medium" / "partial" placeholders.
+    risk, risk_metrics = assess_risk(
         intent_result.intent,
         affected_symbols,
         affected_files,
@@ -575,6 +646,17 @@ def create_plan(
     )
     
     # Phase 7: Create plan object
+    test_coverage_text = (
+        "tests detected among affected files"
+        if risk_metrics["has_test_coverage"]
+        else "no tests detected among affected files"
+    )
+    critical_path_text = (
+        "yes - touches entry point/main/server file(s)"
+        if risk_metrics["is_critical_path"]
+        else "no"
+    )
+
     reasoning = f"""
 Classified intent: {intent_result.intent.value} (confidence: {intent_result.confidence:.1%})
 Keywords matched: {', '.join(intent_result.keywords) if intent_result.keywords else 'none'}
@@ -585,10 +667,11 @@ Impact Analysis:
 - Total dependencies: {sum(len(d) for d in dependencies.values())}
 
 Risk Assessment:
-- Files modified: {len(affected_files)}
-- Symbols affected: {len(affected_symbols)}
-- Dependency complexity: medium
-- Test coverage: partial
+- Files modified: {risk_metrics['file_count']}
+- Symbols affected: {risk_metrics['symbol_count']}
+- Dependency complexity: {risk_metrics['dependency_complexity']}
+- Test coverage: {test_coverage_text}
+- Critical path: {critical_path_text}
 
 Approach:
 1. Locate and validate all affected symbols/files
