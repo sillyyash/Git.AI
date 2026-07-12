@@ -213,9 +213,49 @@ Provide:
 """
 
 
+# ---------------------------------------------------------------------------
+# Structured (JSON) output contract for the actual model.generate() call.
+# prompt_builder.build_prompt(..., mode="planner", output_format="json")
+# already appends a generic "return JSON only" instruction; this appends the
+# concrete schema so the response can be parsed straight into a Plan.
+# ---------------------------------------------------------------------------
+
+PLANNER_JSON_SCHEMA_PROMPT = """Return ONLY valid JSON matching this schema.
+No markdown code fences, no prose before or after the JSON object.
+
+{
+  "intent": "rename|refactor|feature|bug|explain|review|optimize|delete|generate|test|docs|unknown",
+  "risk": "low|medium|high",
+  "complexity": "trivial|small|medium|large",
+  "confidence": 0.0,
+  "summary": "one sentence summary of the operation",
+  "reasoning": "explanation of the analysis and approach",
+  "assumptions": ["assumption 1", "assumption 2"],
+  "clarification_questions": ["question, only if something is genuinely ambiguous"],
+  "steps": [
+    {
+      "id": "step_1",
+      "agent": "planner|coder|tester|reviewer|committer",
+      "action": "short action name",
+      "description": "what this step does",
+      "files": ["path/to/file.py"],
+      "symbols": ["symbol_name"],
+      "depends_on": ["step_id_it_depends_on"],
+      "validation": "how to confirm this step succeeded"
+    }
+  ]
+}
+"""
+
+
 def get_system_prompt() -> str:
     """Get the system prompt for the Planner Agent."""
     return PLANNER_SYSTEM_PROMPT
+
+
+def get_planner_json_prompt() -> str:
+    """Get the structured-output schema instruction for LLM-driven planning."""
+    return PLANNER_JSON_SCHEMA_PROMPT
 
 
 def get_understand_prompt(request: str, repository_context: str) -> str:

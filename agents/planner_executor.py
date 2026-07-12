@@ -1,25 +1,41 @@
 """Planner execution coordinator.
 
-Orchestrates the planning pipeline without accessing graphs directly.
-Uses only core.queries and core.intelligence APIs.
+Orchestrates the planning pipeline. Never accesses graphs directly and never
+re-implements repository intelligence, context gathering, or prompt assembly
+- those are core.queries / core.context_builder / core.prompt_builder's job.
 
 Pipeline:
-1. Intent Detection → classify request intent
-2. Repository Intelligence → gather context about repo
-3. Impact Analysis → find affected symbols and files
-4. Dependency Analysis → detect dependencies and relationships
-5. Risk Analysis → assess operation risk
-6. Complexity Estimation → estimate effort
-7. Plan Generation → create ordered execution steps
+
+    User request
+        v
+    classify_intent()                  (agents.planner_rules - planner's own job)
+        v
+    context_builder.build_context()    (repository intelligence, symbol search,
+        v                               dependency/impact analysis - reused, not duplicated)
+    [missing-info / clarification check -> early return if ambiguous]
+        v
+    prompt_builder.build_prompt(mode="planner", output_format="json")
+        v
+    core.model.OllamaClient.generate()  (LLM plans; heuristics are the fallback,
+        v                                not the primary path)
+    parse structured JSON -> risk/complexity/steps/confidence/reasoning
+        v
+    (heuristic estimate_risk/estimate_complexity/generate_execution_plan
+     fill in anything the LLM didn't return, or everything if use_llm=False
+     or the model call fails)
+        v
+    validate + repair execution steps
+        v
+    Plan object
 """
 
 from __future__ import annotations
 
 import os
-from typing import Optional, Dict, List, Any, Tuple
-import json
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Type
 
+from agents.planner_config import PlannerConfig
 from agents.planner_models import (
     Intent,
     Risk,
@@ -27,20 +43,16 @@ from agents.planner_models import (
     Plan,
     ExecutionStep,
     Symbol,
-    PlanningContext,
     IntentClassificationResult,
 )
-from agents.planner_rules import classify_intent, estimate_risk, estimate_complexity
-from agents.planner_prompts import get_system_prompt
+from agents.planner_rules import classify_intent, estimate_risk, estimate_complexity, compute_confidence
+from agents.planner_prompts import get_planner_json_prompt
 
-# Import only the public API - never import graph modules directly
+# Public APIs only - this is the whole point of the rewrite.
 from core import queries
-
-# Reuse the same keyword extraction used by context_builder.py rather than
-# re-implementing (and under-filtering) it here. This is the same stopword
-# list / tokenization that seeds prompt context, so "add", "the", "fix" etc.
-# never reach queries.search_symbol as noise queries.
-from core.context_builder import _extract_keywords
+from core.context_builder import build_context
+from core.prompt_builder import build_prompt
+from core.model import OllamaClient
 
 
 # ---------------------------------------------------------------------------
@@ -48,289 +60,140 @@ from core.context_builder import _extract_keywords
 # ---------------------------------------------------------------------------
 
 def detect_intent(request: str) -> IntentClassificationResult:
-    """Detect user intent from request text.
-    
-    Uses keyword matching and heuristics (no LLM required for basic classification).
-    Returns structured intent with confidence.
-    
-    Args:
-        request: User's request text
-        
-    Returns:
-        IntentClassificationResult with classified intent and confidence
-    """
+    """Detect user intent from request text (keyword/pattern heuristics)."""
     return classify_intent(request)
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: Repository Intelligence Gathering
+# Phase 2: Impact extraction from Context Builder output
 # ---------------------------------------------------------------------------
+#
+# NOTE: this used to be a hand-rolled analyze_impact() that called
+# queries.search_symbol() in a loop and re-derived affected files/deps
+# itself - duplicating what context_builder.build_context() already does
+# (symbol scoring, definitions, references, owners, components, dependency
+# tree, impact analysis, related files, caching). That loop is gone; we now
+# just read the fields context_builder already computed.
 
-def gather_repository_context(ctx: PlanningContext) -> Dict[str, Any]:
-    """Gather high-level repository context using intelligence API.
-    
-    Builds repository profile for understanding code organization, frameworks,
-    and architecture without accessing internal graphs.
-    
-    Args:
-        ctx: PlanningContext with repository data
-        
-    Returns:
-        Dictionary with repository profile, architecture, frameworks, etc.
-    """
-    try:
-        profile = queries.build_repository_profile(
-            ctx.repository_index,
-            ctx.dependency_graph,
-            ctx.relationship_graph,
-        )
-        return profile
-    except Exception as e:
-        if ctx.debug:
-            print(f"Warning: Could not build repository profile: {e}")
-        return {
-            "status": "unavailable",
-            "error": str(e),
-        }
-
-
-# ---------------------------------------------------------------------------
-# Phase 3: Impact Analysis
-# ---------------------------------------------------------------------------
-
-def analyze_impact(
-    ctx: PlanningContext,
-    request: str,
-    intent: Intent,
-) -> tuple[List[Symbol], List[str], Dict[str, List[str]]]:
-    """Analyze impact of the requested operation.
-    
-    Uses queries API to find affected symbols, files, and dependencies.
-    
-    Args:
-        ctx: PlanningContext with repository data
-        request: Original user request
-        intent: Classified intent
-        
-    Returns:
-        Tuple of (affected_symbols, affected_files, dependencies_map)
-    """
-    affected_symbols: List[Symbol] = []
-    affected_files: List[str] = []
-    dependencies: Dict[str, List[str]] = {}
-
-    # BUG FIX: this used to be
-    #   re.findall(r'\b[a-zA-Z_]\w*\b', request)
-    # which had zero stopword filtering, so every request fired a
-    # search_symbol() call for "add", "the", "fix", "and", "for", etc.
-    # _extract_keywords() already does tokenization + stopword removal +
-    # dedup (it's the same helper context_builder.py uses to seed prompt
-    # context), so reuse it instead of duplicating weaker logic here.
-    potential_symbols = _extract_keywords(request)
-
-    # Search repository for mentioned symbols
-    for symbol_name in potential_symbols:
-        if len(symbol_name) < 3:
+def _affected_symbols_from_context(context: Dict[str, Any], config: PlannerConfig) -> List[Symbol]:
+    symbols: List[Symbol] = []
+    for entry in (context.get("symbols") or [])[: config.max_symbols]:
+        name = entry.get("symbol")
+        if not name:
             continue
-        
-        try:
-            search_results = queries.search_symbol(
-                ctx.dependency_graph,
-                ctx.relationship_graph,
-                symbol_name,
-                limit=10,
-            )
-            
-            for result in search_results:
-                sym = Symbol(
-                    name=result["symbol"],
-                    kind=result["kind"],
-                    file=result.get("file"),
-                )
-                if sym not in affected_symbols:
-                    affected_symbols.append(sym)
-                
-                if result.get("file") and result["file"] not in affected_files:
-                    affected_files.append(result["file"])
-        except Exception as e:
-            if ctx.debug:
-                print(f"Warning: Search failed for '{symbol_name}': {e}")
-    
-    # Build dependency map for affected files
-    for file_path in affected_files:
-        try:
-            deps = queries.find_all_dependencies(
-                ctx.dependency_graph,
-                file_path,
-            )
-            dependencies[file_path] = deps
-        except Exception as e:
-            if ctx.debug:
-                print(f"Warning: Dependency analysis failed for '{file_path}': {e}")
-            dependencies[file_path] = []
-    
-    return affected_symbols, affected_files, dependencies
+        symbols.append(Symbol(name=name, kind=entry.get("kind", "unknown"), file=entry.get("file")))
+    return symbols
+
+
+def _affected_files_from_context(context: Dict[str, Any], config: PlannerConfig) -> List[str]:
+    files: List[str] = []
+
+    def add(f: Optional[str]) -> None:
+        if f and f not in files:
+            files.append(f)
+
+    for entry in context.get("symbols") or []:
+        add(entry.get("file"))
+    for f in context.get("owners") or []:
+        add(f)
+    for f in context.get("related_files") or []:
+        add(f)
+    for f in context.get("query_files") or []:
+        add(f)
+
+    return files[: config.max_files]
 
 
 # ---------------------------------------------------------------------------
-# Phase 4: Risk Assessment
+# Phase 3: Critical-path detection (used for risk scoring)
 # ---------------------------------------------------------------------------
+
+_CRITICAL_KEYWORDS = {"main", "entry", "index", "app", "server"}
+
 
 def _is_critical_path_file(file_path: str) -> bool:
-    """Return True only if a path SEGMENT or filename STEM matches a critical
-    keyword - not a raw substring of the whole path.
-
-    BUG FIX: the old version did
-        any(keyword in f.lower() for keyword in ["main", "entry", "index", "app", "server"])
-    which false-positives on things like 'user_index.py', 'app_config.py',
-    'apparel.py', 'mainframe_utils.py'. Comparing against path segments and
-    the filename stem (without extension) avoids that.
-    """
-    critical_keywords = {"main", "entry", "index", "app", "server"}
-
+    """True only if a path SEGMENT or filename STEM matches a critical
+    keyword - not a raw substring (avoids false positives like
+    'user_index.py' or 'apparel.py')."""
     normalized = file_path.replace("\\", "/").lower()
     segments = [s for s in normalized.split("/") if s]
-
     if not segments:
         return False
 
     filename = segments[-1]
     stem = os.path.splitext(filename)[0]
 
-    # directory segment exactly named one of the keywords (e.g. "app/", "server/")
-    if any(segment in critical_keywords for segment in segments[:-1]):
+    if any(segment in _CRITICAL_KEYWORDS for segment in segments[:-1]):
         return True
-
-    # filename stem exactly matches (e.g. "main.py", "index.js", "server.py")
-    # or is keyword + separator (e.g. "app_config" no, but "app.py" yes,
-    # "main_router.py" yes since it starts with "main_")
-    for keyword in critical_keywords:
-        if stem == keyword:
+    for keyword in _CRITICAL_KEYWORDS:
+        if stem == keyword or stem.startswith(f"{keyword}_") or stem.startswith(f"{keyword}."):
             return True
-        if stem.startswith(f"{keyword}_") or stem.startswith(f"{keyword}."):
-            return True
-
     return False
 
 
-def assess_risk(
-    intent: Intent,
-    affected_symbols: List[Symbol],
-    affected_files: List[str],
-    dependencies: Dict[str, List[str]],
-    repo_profile: Dict[str, Any],
-) -> Tuple[Risk, Dict[str, Any]]:
-    """Assess operation risk using heuristics.
-    
-    Args:
-        intent: The classified intent
-        affected_symbols: Affected code symbols
-        affected_files: Affected files
-        dependencies: Dependency map
-        repo_profile: Repository profile
-        
-    Returns:
-        Tuple of (Risk level assessment, metrics dict used to compute it).
+# ---------------------------------------------------------------------------
+# Phase 4: LLM-driven planning (primary path)
+# ---------------------------------------------------------------------------
 
-        The metrics dict is returned (not just the enum) so callers like
-        create_plan() can report the *actual* computed values in reasoning
-        text instead of hardcoding placeholder strings.
-    """
-    # Calculate metrics
-    file_count = len(affected_files)
-    symbol_count = len(affected_symbols)
-    dependency_count = sum(len(deps) for deps in dependencies.values())
-    max_dependency_depth = max((len(deps) for deps in dependencies.values()), default=0)
-    
-    # Estimate test coverage (heuristic)
-    has_test_coverage = any(
-        "test" in f.lower() for f in affected_files
-    )
-    
-    # Check if in critical path (heuristic: entry points, main files)
-    is_critical_path = any(_is_critical_path_file(f) for f in affected_files)
+def _call_llm_planner(client: OllamaClient, prompt: str) -> Optional[Dict[str, Any]]:
+    """Call the model and parse a structured plan. Returns None (never
+    raises) on any failure so callers always have a heuristic fallback."""
+    try:
+        raw = client.generate(prompt)
+    except Exception:
+        return None
 
-    risk = estimate_risk(
-        intent=intent,
-        affected_file_count=file_count,
-        affected_symbol_count=symbol_count,
-        dependency_count=dependency_count,
-        has_test_coverage=has_test_coverage,
-        is_critical_path=is_critical_path,
-    )
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text[:4].lower() == "json":
+            text = text[4:]
+        text = text.strip()
 
-    if dependency_count > 20 or max_dependency_depth > 10:
-        dependency_complexity = "high"
-    elif dependency_count > 5 or max_dependency_depth > 3:
-        dependency_complexity = "medium"
-    else:
-        dependency_complexity = "low"
+    import json as _json
+    try:
+        parsed = _json.loads(text)
+    except (ValueError, TypeError):
+        return None
 
-    metrics = {
-        "file_count": file_count,
-        "symbol_count": symbol_count,
-        "dependency_count": dependency_count,
-        "has_test_coverage": has_test_coverage,
-        "is_critical_path": is_critical_path,
-        "dependency_complexity": dependency_complexity,
-    }
+    return parsed if isinstance(parsed, dict) else None
 
-    return risk, metrics
+
+def _coerce_enum(enum_cls: Type, value: Any, fallback: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return enum_cls(value.strip().lower())
+        except ValueError:
+            return fallback
+    return fallback
+
+
+def _steps_from_llm(raw_steps: List[Any], config: PlannerConfig) -> List[ExecutionStep]:
+    steps: List[ExecutionStep] = []
+    for i, raw in enumerate(raw_steps[: config.max_steps]):
+        if not isinstance(raw, dict):
+            continue
+        symbols = [
+            Symbol(name=s, kind="unknown")
+            for s in (raw.get("symbols") or [])
+            if isinstance(s, str)
+        ]
+        steps.append(ExecutionStep(
+            id=str(raw.get("id") or f"step_{i + 1}"),
+            order=i + 1,
+            agent=str(raw.get("agent") or "coder"),
+            action=str(raw.get("action") or "unspecified"),
+            description=str(raw.get("description") or ""),
+            affected_symbols=symbols,
+            affected_files=[f for f in (raw.get("files") or []) if isinstance(f, str)],
+            depends_on=[d for d in (raw.get("depends_on") or []) if isinstance(d, str)],
+            validation=raw.get("validation") if isinstance(raw.get("validation"), str) else None,
+        ))
+    return steps
 
 
 # ---------------------------------------------------------------------------
-# Phase 5: Complexity Estimation
-# ---------------------------------------------------------------------------
-
-def estimate_operation_complexity(
-    intent: Intent,
-    affected_symbols: List[Symbol],
-    affected_files: List[str],
-    dependencies: Dict[str, List[str]],
-) -> Complexity:
-    """Estimate operation complexity using heuristics.
-    
-    Args:
-        intent: Classified intent
-        affected_symbols: Affected code symbols
-        affected_files: Affected files
-        dependencies: Dependency map
-        
-    Returns:
-        Complexity level assessment
-    """
-    # Calculate metrics
-    file_count = len(affected_files)
-    symbol_count = len(affected_symbols)
-    
-    # Estimate dependency depth
-    max_depth = 0
-    for deps in dependencies.values():
-        if deps:
-            max_depth = max(max_depth, len(deps))
-    
-    # Check for circular dependencies (heuristic)
-    has_circular_deps = False
-    for file_path, deps in dependencies.items():
-        if file_path in deps:
-            has_circular_deps = True
-            break
-    
-    # Data migration needed? (heuristic)
-    requires_data_migration = intent in {Intent.REFACTOR, Intent.FEATURE}
-    
-    return estimate_complexity(
-        intent=intent,
-        affected_file_count=file_count,
-        affected_symbol_count=symbol_count,
-        dependency_depth=max_depth,
-        has_circular_dependencies=has_circular_deps,
-        requires_data_migration=requires_data_migration,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Phase 6: Execution Plan Generation
+# Phase 5: Heuristic execution plan generation (fallback path)
 # ---------------------------------------------------------------------------
 
 def generate_execution_plan(
@@ -342,27 +205,11 @@ def generate_execution_plan(
     risk: Risk,
     complexity: Complexity,
 ) -> List[ExecutionStep]:
-    """Generate ordered execution steps for the operation.
-    
-    Creates steps based on intent and analysis. Each step is executable
-    by downstream agents (Coder, Tester, Reviewer, Committer).
-    
-    Args:
-        intent: Classified intent
-        request: Original user request
-        affected_symbols: Affected code symbols
-        affected_files: Affected files
-        dependencies: Dependency map
-        risk: Risk level
-        complexity: Complexity level
-        
-    Returns:
-        Ordered list of ExecutionStep objects
-    """
+    """Generate ordered execution steps for the operation using fixed
+    per-intent templates. Used when LLM planning is disabled or fails."""
     steps: List[ExecutionStep] = []
     step_order = 0
-    
-    # Phase 1: Locate and validate
+
     step_order += 1
     steps.append(ExecutionStep(
         id="locate_symbols",
@@ -380,8 +227,7 @@ def generate_execution_plan(
         },
         validation="All affected symbols and files identified and accessible",
     ))
-    
-    # Phase 2: Analyze dependencies
+
     step_order += 1
     steps.append(ExecutionStep(
         id="analyze_deps",
@@ -397,94 +243,37 @@ def generate_execution_plan(
         },
         validation="Dependency analysis complete, no circular deps unhandled",
     ))
-    
-    # Phase 3: Prepare changes (Coder-specific steps based on intent)
+
     step_order += 1
-    
-    if intent == Intent.RENAME:
-        steps.append(ExecutionStep(
-            id="prepare_rename",
-            order=step_order,
-            agent="coder",
-            action="prepare_refactoring",
-            description="Prepare rename operation with import updates",
-            affected_symbols=affected_symbols,
-            affected_files=affected_files,
-            depends_on=["analyze_deps"],
-            context={
-                "operation": "rename",
-                "symbols_to_rename": [s.name for s in affected_symbols],
-            },
-            validation="All references identified and prepared for renaming",
-        ))
-    
-    elif intent == Intent.REFACTOR:
-        steps.append(ExecutionStep(
-            id="prepare_refactor",
-            order=step_order,
-            agent="coder",
-            action="prepare_refactoring",
-            description="Prepare refactoring structure changes",
-            affected_files=affected_files,
-            depends_on=["analyze_deps"],
-            context={"operation": "refactor"},
-            validation="Refactoring structure prepared and validated",
-        ))
-    
-    elif intent == Intent.FEATURE:
-        steps.append(ExecutionStep(
-            id="prepare_feature",
-            order=step_order,
-            agent="coder",
-            action="scaffold_feature",
-            description="Scaffold new feature structure and placeholders",
-            affected_files=affected_files,
-            depends_on=["analyze_deps"],
-            context={"operation": "feature"},
-            validation="Feature scaffold created with proper imports",
-        ))
-    
-    elif intent == Intent.DELETE:
-        steps.append(ExecutionStep(
-            id="prepare_delete",
-            order=step_order,
-            agent="coder",
-            action="prepare_deletion",
-            description="Identify and prepare dead code removal",
-            affected_files=affected_files,
-            depends_on=["analyze_deps"],
-            context={"operation": "delete"},
-            validation="Dead code identified, imports cleaned up",
-        ))
-    
-    elif intent == Intent.BUG:
-        steps.append(ExecutionStep(
-            id="prepare_bugfix",
-            order=step_order,
-            agent="coder",
-            action="prepare_bugfix",
-            description="Prepare targeted bug fix",
-            affected_symbols=affected_symbols,
-            depends_on=["analyze_deps"],
-            context={"operation": "bugfix"},
-            validation="Bug root cause identified and fix prepared",
-        ))
-    
-    else:
-        # Generic preparation step for other intents
-        steps.append(ExecutionStep(
-            id="prepare_changes",
-            order=step_order,
-            agent="coder",
-            action="prepare_changes",
-            description=f"Prepare changes for {intent.value} operation",
-            affected_files=affected_files,
-            depends_on=["analyze_deps"],
-            context={"operation": intent.value},
-            validation="Changes prepared and validated",
-        ))
-    
-    # Phase 4: Testing
+    intent_step_map = {
+        Intent.RENAME: ("prepare_rename", "prepare_refactoring", "Prepare rename operation with import updates",
+                        {"operation": "rename", "symbols_to_rename": [s.name for s in affected_symbols]}),
+        Intent.REFACTOR: ("prepare_refactor", "prepare_refactoring", "Prepare refactoring structure changes",
+                           {"operation": "refactor"}),
+        Intent.FEATURE: ("prepare_feature", "scaffold_feature", "Scaffold new feature structure and placeholders",
+                          {"operation": "feature"}),
+        Intent.DELETE: ("prepare_delete", "prepare_deletion", "Identify and prepare dead code removal",
+                         {"operation": "delete"}),
+        Intent.BUG: ("prepare_bugfix", "prepare_bugfix", "Prepare targeted bug fix",
+                     {"operation": "bugfix"}),
+    }
+    step_id, action, description, extra_context = intent_step_map.get(
+        intent, (f"prepare_{intent.value}", "prepare_changes", f"Prepare changes for {intent.value} operation",
+                 {"operation": intent.value})
+    )
+    steps.append(ExecutionStep(
+        id=step_id,
+        order=step_order,
+        agent="coder",
+        action=action,
+        description=description,
+        affected_symbols=affected_symbols if intent in {Intent.RENAME, Intent.BUG} else [],
+        affected_files=affected_files if intent != Intent.BUG else [],
+        depends_on=["analyze_deps"],
+        context=extra_context,
+        validation="Changes prepared and validated",
+    ))
+
     step_order += 1
     steps.append(ExecutionStep(
         id="test_changes",
@@ -493,14 +282,10 @@ def generate_execution_plan(
         action="run_tests",
         description="Run unit and integration tests",
         depends_on=[steps[-1].id],
-        context={
-            "test_types": ["unit", "integration"],
-            "complexity": complexity.value,
-        },
+        context={"test_types": ["unit", "integration"], "complexity": complexity.value},
         validation="All tests pass, no regressions",
     ))
-    
-    # Phase 5: Code review
+
     step_order += 1
     steps.append(ExecutionStep(
         id="review_changes",
@@ -509,14 +294,10 @@ def generate_execution_plan(
         action="review_code",
         description="Review code quality, style, and best practices",
         depends_on=["test_changes"],
-        context={
-            "review_focus": _get_review_focus(intent),
-            "risk_level": risk.value,
-        },
+        context={"review_focus": _get_review_focus(intent), "risk_level": risk.value},
         validation="Code review passed, no blocking issues",
     ))
-    
-    # Phase 6: Commit and finalize
+
     step_order += 1
     steps.append(ExecutionStep(
         id="commit_changes",
@@ -525,17 +306,14 @@ def generate_execution_plan(
         action="commit_and_push",
         description="Commit changes and push to repository",
         depends_on=["review_changes"],
-        context={
-            "commit_message_template": _get_commit_template(intent),
-        },
+        context={"commit_message_template": _get_commit_template(intent)},
         validation="Changes committed and pushed successfully",
     ))
-    
+
     return steps
 
 
 def _get_review_focus(intent: Intent) -> str:
-    """Get code review focus areas based on intent."""
     focus_map = {
         Intent.RENAME: "naming consistency, references, imports",
         Intent.REFACTOR: "code structure, maintainability, backward compatibility",
@@ -550,7 +328,6 @@ def _get_review_focus(intent: Intent) -> str:
 
 
 def _get_commit_template(intent: Intent) -> str:
-    """Get commit message template based on intent."""
     template_map = {
         Intent.RENAME: "refactor: rename {symbol} to {new_symbol}",
         Intent.REFACTOR: "refactor: restructure {component}",
@@ -565,99 +342,51 @@ def _get_commit_template(intent: Intent) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Complete Planning Pipeline
+# Phase 6: Plan validation / repair
 # ---------------------------------------------------------------------------
 
-def create_plan(
-    request: str,
-    repository_index: Any,
-    dependency_graph: Any,
-    relationship_graph: Any,
-    debug: bool = False,
-) -> Plan:
-    """Create a complete execution plan for a user request.
-    
-    Orchestrates the full planning pipeline:
-    1. Detect intent
-    2. Gather repository context
-    3. Analyze impact
-    4. Assess risk
-    5. Estimate complexity
-    6. Generate execution plan
-    
-    Args:
-        request: User's request text
-        repository_index: RepositoryIndex instance
-        dependency_graph: DependencyGraph instance
-        relationship_graph: RelationshipGraph instance
-        debug: Enable debug output
-        
-    Returns:
-        Complete Plan object with all analysis and steps
-    """
-    ctx = PlanningContext(
-        request=request,
-        repository_index=repository_index,
-        dependency_graph=dependency_graph,
-        relationship_graph=relationship_graph,
-        debug=debug,
-    )
-    
-    # Phase 1: Detect intent
-    intent_result = detect_intent(request)
-    
-    # Phase 2: Gather repository context
-    repo_profile = gather_repository_context(ctx)
-    
-    # Phase 3: Analyze impact
-    affected_symbols, affected_files, dependencies = analyze_impact(
-        ctx, request, intent_result.intent
-    )
-    
-    # Phase 4: Assess risk
-    # BUG FIX: assess_risk now returns (risk, metrics) instead of just risk,
-    # so the reasoning text below can report the real computed values
-    # instead of the old hardcoded "medium" / "partial" placeholders.
-    risk, risk_metrics = assess_risk(
-        intent_result.intent,
-        affected_symbols,
-        affected_files,
-        dependencies,
-        repo_profile,
-    )
-    
-    # Phase 5: Estimate complexity
-    complexity = estimate_operation_complexity(
-        intent_result.intent,
-        affected_symbols,
-        affected_files,
-        dependencies,
-    )
-    
-    # Phase 6: Generate execution plan
-    execution_steps = generate_execution_plan(
-        intent_result.intent,
-        request,
-        affected_symbols,
-        affected_files,
-        dependencies,
-        risk,
-        complexity,
-    )
-    
-    # Phase 7: Create plan object
+def _validate_and_repair(
+    steps: List[ExecutionStep],
+    affected_files: List[str],
+    affected_symbols: List[Symbol],
+) -> List[str]:
+    """Every non-planner step must reference at least one file or symbol.
+    Repair by falling back to the global affected set; record what was
+    repaired instead of silently returning an incomplete plan."""
+    warnings: List[str] = []
+    for step in steps:
+        if step.agent == "planner":
+            continue
+        if not step.affected_files and not step.affected_symbols:
+            step.affected_files = list(affected_files)
+            step.affected_symbols = list(affected_symbols)
+            warnings.append(
+                f"Step '{step.id}' had no files/symbols; repaired using globally affected files/symbols."
+            )
+    return warnings
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: Reasoning text (heuristic fallback, when LLM has none)
+# ---------------------------------------------------------------------------
+
+def _build_heuristic_reasoning(
+    intent_result: IntentClassificationResult,
+    affected_symbols: List[Symbol],
+    affected_files: List[str],
+    dependencies: Dict[str, List[str]],
+    has_test_coverage: bool,
+    is_critical_path: bool,
+    dependency_complexity: str,
+) -> str:
     test_coverage_text = (
-        "tests detected among affected files"
-        if risk_metrics["has_test_coverage"]
+        "tests detected among affected files" if has_test_coverage
         else "no tests detected among affected files"
     )
     critical_path_text = (
-        "yes - touches entry point/main/server file(s)"
-        if risk_metrics["is_critical_path"]
-        else "no"
+        "yes - touches entry point/main/server file(s)" if is_critical_path else "no"
     )
-
-    reasoning = f"""
+    return f"""
 Classified intent: {intent_result.intent.value} (confidence: {intent_result.confidence:.1%})
 Keywords matched: {', '.join(intent_result.keywords) if intent_result.keywords else 'none'}
 
@@ -667,9 +396,7 @@ Impact Analysis:
 - Total dependencies: {sum(len(d) for d in dependencies.values())}
 
 Risk Assessment:
-- Files modified: {risk_metrics['file_count']}
-- Symbols affected: {risk_metrics['symbol_count']}
-- Dependency complexity: {risk_metrics['dependency_complexity']}
+- Dependency complexity: {dependency_complexity}
 - Test coverage: {test_coverage_text}
 - Critical path: {critical_path_text}
 
@@ -680,37 +407,215 @@ Approach:
 4. Execute comprehensive testing
 5. Perform code review
 6. Commit changes with proper messaging
-"""
-    
-    validation_steps = [
-        "All affected symbols located and accessible",
-        "Dependencies analyzed and documented",
-        "No unhandled circular dependencies",
-        "Changes prepared according to intent",
-        "All tests pass",
-        "Code review approved",
-        "Changes committed successfully",
-    ]
-    
-    plan = Plan(
+""".strip()
+
+
+# ---------------------------------------------------------------------------
+# Complete Planning Pipeline
+# ---------------------------------------------------------------------------
+
+def create_plan(
+    request: str,
+    repository_index: Any,
+    dependency_graph: Any,
+    relationship_graph: Any,
+    config: Optional[PlannerConfig] = None,
+    debug: bool = False,
+) -> Plan:
+    """Create a complete execution plan for a user request.
+
+    Args:
+        request: User's request text
+        repository_index: RepositoryIndex instance
+        dependency_graph: DependencyGraph instance
+        relationship_graph: RelationshipGraph instance
+        config: PlannerConfig (thresholds/weights/mode); defaults if omitted
+        debug: Enable debug output
+
+    Returns:
+        Complete Plan object with all analysis and steps
+    """
+    config = config or PlannerConfig()
+
+    # Phase 1: intent
+    intent_result = detect_intent(request)
+
+    # Phase 2: repository context (Context Builder owns symbol search,
+    # definitions/references/owners/components, dependency tree, impact
+    # analysis, and the repository profile - not re-implemented here)
+    context = build_context(
+        request, repository_index, dependency_graph, relationship_graph,
+        max_symbols=config.max_symbols,
+    )
+    repository_profile: Dict[str, Any] = dict(context.get("repository_profile") or {})
+
+    if config.planning_mode == "deep":
+        try:
+            full_profile = queries.build_repository_profile(
+                repository_index, dependency_graph, relationship_graph
+            )
+            repository_profile = {**repository_profile, **full_profile}
+        except Exception as e:
+            if debug:
+                print(f"Warning: deep-mode repository profile unavailable: {e}")
+
+    affected_symbols = _affected_symbols_from_context(context, config)
+    affected_files = _affected_files_from_context(context, config)
+
+    # Phase 3: missing-information / clarification detection - return early
+    # rather than fabricate a plan on ambiguous or unsupported requests.
+    missing_information: List[str] = []
+    clarification_questions: List[str] = []
+
+    if intent_result.intent == Intent.UNKNOWN or intent_result.confidence < config.clarification_threshold:
+        missing_information.append("Intent could not be classified confidently from the request text.")
+        clarification_questions.append(
+            "Could you clarify the type of change you want (rename, add a feature, fix a bug, etc.)?"
+        )
+
+    if not affected_symbols and not affected_files:
+        missing_information.append("No matching symbols or files were found in the repository for this request.")
+        clarification_questions.append("Which file(s) or symbol(s) should this change involve?")
+
+    if clarification_questions:
+        return Plan(
+            intent=intent_result.intent,
+            request=request,
+            summary="Clarification needed before a plan can be produced.",
+            reasoning="\n".join(missing_information),
+            confidence=intent_result.confidence,
+            repository_profile=repository_profile,
+            missing_information=missing_information,
+            clarification_questions=clarification_questions,
+            status="needs_clarification",
+            created_at=datetime.now().isoformat(),
+        )
+
+    # Phase 4: dependency assembly (skipped/limited in "quick" mode)
+    if config.planning_mode == "quick":
+        affected_files = affected_files[:5]
+        dependencies: Dict[str, List[str]] = {}
+    else:
+        dependencies = {
+            f: queries.find_all_dependencies(dependency_graph, f)
+            for f in affected_files
+        }
+
+    has_test_coverage = any("test" in f.lower() for f in affected_files)
+    is_critical_path = any(_is_critical_path_file(f) for f in affected_files)
+    dependency_count = sum(len(d) for d in dependencies.values())
+    dependency_depth = max((len(d) for d in dependencies.values()), default=0)
+    has_circular_deps = any(f in deps for f, deps in dependencies.items())
+    requires_data_migration = intent_result.intent in {Intent.REFACTOR, Intent.FEATURE}
+
+    if dependency_count > 20 or dependency_depth > 10:
+        dependency_complexity = "high"
+    elif dependency_count > 5 or dependency_depth > 3:
+        dependency_complexity = "medium"
+    else:
+        dependency_complexity = "low"
+
+    # Phase 5: heuristic risk/complexity (always computed - either the final
+    # answer, or the fallback if the LLM call below fails/is disabled)
+    risk = estimate_risk(
+        intent_result.intent, len(affected_files), len(affected_symbols),
+        dependency_count, has_test_coverage, is_critical_path,
+        weights=config.risk_weights,
+    )
+    complexity = estimate_complexity(
+        intent_result.intent, len(affected_files), len(affected_symbols),
+        dependency_depth, has_circular_deps, requires_data_migration,
+        weights=config.complexity_weights,
+    )
+
+    # Phase 6: LLM-driven planning (primary path) via Prompt Builder + model.py
+    llm_plan: Optional[Dict[str, Any]] = None
+    if config.use_llm:
+        try:
+            prompt, _ = build_prompt(
+                request, context, mode="planner", output_format="json", return_stats=True,
+            )
+            prompt = f"{prompt}\n\n{get_planner_json_prompt()}"
+            client = OllamaClient(**(config.model_overrides or {}))
+            llm_plan = _call_llm_planner(client, prompt)
+        except Exception as e:
+            if debug:
+                print(f"Warning: LLM planning unavailable, using heuristics only: {e}")
+            llm_plan = None
+
+    if llm_plan:
+        risk = _coerce_enum(Risk, llm_plan.get("risk"), risk)
+        complexity = _coerce_enum(Complexity, llm_plan.get("complexity"), complexity)
+
+    execution_steps = (
+        _steps_from_llm(llm_plan["steps"], config)
+        if llm_plan and llm_plan.get("steps")
+        else generate_execution_plan(
+            intent_result.intent, request, affected_symbols, affected_files,
+            dependencies, risk, complexity,
+        )
+    )[: config.max_steps]
+
+    warnings = _validate_and_repair(execution_steps, affected_files, affected_symbols)
+
+    # Phase 7: confidence - combines intent confidence, how much of the
+    # symbol budget we actually filled, and whether repository/dependency
+    # context was available at all, then blends in the LLM's own confidence
+    # if it returned one.
+    symbol_match_ratio = min(1.0, len(affected_symbols) / max(1, config.max_symbols))
+    repository_confidence = 1.0 if repository_profile else 0.5
+    dependency_confidence = 1.0 if dependencies else 0.5
+    confidence = compute_confidence(
+        intent_result.confidence, symbol_match_ratio, repository_confidence, dependency_confidence
+    )
+    llm_confidence = llm_plan.get("confidence") if llm_plan else None
+    if isinstance(llm_confidence, (int, float)):
+        confidence = (confidence + max(0.0, min(1.0, float(llm_confidence)))) / 2
+
+    reasoning = (
+        llm_plan["reasoning"] if llm_plan and isinstance(llm_plan.get("reasoning"), str)
+        else _build_heuristic_reasoning(
+            intent_result, affected_symbols, affected_files, dependencies,
+            has_test_coverage, is_critical_path, dependency_complexity,
+        )
+    )
+    summary = (
+        llm_plan["summary"] if llm_plan and isinstance(llm_plan.get("summary"), str)
+        else f"Plan for {intent_result.intent.value}: {request[:80]}..."
+    )
+    assumptions = (
+        [a for a in llm_plan.get("assumptions", []) if isinstance(a, str)] if llm_plan else []
+    )
+
+    return Plan(
         intent=intent_result.intent,
         request=request,
-        summary=f"Plan for {intent_result.intent.value}: {request[:80]}...",
-        reasoning=reasoning.strip(),
+        summary=summary,
+        reasoning=reasoning,
+        confidence=confidence,
+        repository_profile=repository_profile,
         affected_symbols=affected_symbols,
         affected_files=affected_files,
         dependencies=dependencies,
         risk=risk,
         complexity=complexity,
         execution_steps=execution_steps,
-        validation_steps=validation_steps,
+        validation_steps=[
+            "All affected symbols located and accessible",
+            "Dependencies analyzed and documented",
+            "No unhandled circular dependencies",
+            "Changes prepared according to intent",
+            "All tests pass",
+            "Code review approved",
+            "Changes committed successfully",
+        ],
         alternative_approaches=[
             "Phased rollout with feature flags",
             "Backward-compatible wrapper approach",
             "Gradual migration with deprecation warnings",
         ],
+        assumptions=assumptions,
+        warnings=warnings,
         created_at=datetime.now().isoformat(),
         status="created",
     )
-    
-    return plan

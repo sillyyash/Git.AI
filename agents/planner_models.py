@@ -96,6 +96,12 @@ class ExecutionStep:
     
     # Expected outcome validation
     validation: Optional[str] = None
+
+    # Optional planning metadata (populated by LLM planning or left None for
+    # heuristic-generated steps)
+    estimated_time: Optional[str] = None
+    rollback: Optional[str] = None
+    risk: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -126,6 +132,16 @@ class Plan:
     # Risk and complexity assessment
     risk: Risk = Risk.MEDIUM
     complexity: Complexity = Complexity.MEDIUM
+
+    # How confident the planner is in this plan overall (0.0-1.0), combining
+    # intent-classification confidence, symbol-match ratio, repository
+    # confidence, and dependency confidence. See planner_rules.compute_confidence.
+    confidence: float = 0.0
+
+    # Compact repository profile (language, framework, architecture, etc.)
+    # from core.context_builder / core.intelligence, carried for downstream
+    # agents so they don't have to re-derive it.
+    repository_profile: Dict[str, Any] = field(default_factory=dict)
     
     # Execution strategy
     execution_steps: List[ExecutionStep] = field(default_factory=list)
@@ -134,9 +150,15 @@ class Plan:
     # Additional metadata
     alternative_approaches: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    assumptions: List[str] = field(default_factory=list)
+
+    # Populated when the planner cannot confidently proceed without more
+    # information from the user (status will be "needs_clarification").
+    missing_information: List[str] = field(default_factory=list)
+    clarification_questions: List[str] = field(default_factory=list)
     
     # Execution tracking
-    status: str = "created"  # "created", "in_progress", "completed", "failed"
+    status: str = "created"  # "created", "needs_clarification", "in_progress", "completed", "failed"
     created_at: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
