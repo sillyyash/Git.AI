@@ -69,11 +69,11 @@ class TestOllamaClient(unittest.TestCase):
         mock_session = mock_session_class.return_value
         mock_response = Mock()
         mock_response.raise_for_status.return_value = None
-        mock_response.json.return_value = ["qwen2.5-coder:14b"]
+        mock_response.json.return_value = ["deepseek-r1:14b"]
         mock_session.get.return_value = mock_response
 
         client = OllamaClient(model="test-model", base_url="http://localhost:11434", retries=1)
-        self.assertEqual(client.list_models(), ["qwen2.5-coder:14b"])
+        self.assertEqual(client.list_models(), ["deepseek-r1:14b"])
 
     def test_config_class_to_payload(self):
         config = ModelConfig(model="test-model", top_p=0.9, top_k=40, repeat_penalty=1.1)

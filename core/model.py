@@ -12,7 +12,7 @@ from urllib3.util.retry import Retry
 
 @dataclass
 class ModelConfig:
-    model: str = "qwen2.5-coder:14b"
+    model: str = "deepseek-r1:14b"
     base_url: str = "http://localhost:11434"
     system_prompt: Optional[str] = None
     temperature: float = 0.7
