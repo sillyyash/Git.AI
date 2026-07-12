@@ -123,7 +123,7 @@ class CoderResult:
 @dataclass
 class CoderConfig:
     """Coder agent configuration."""
-    model: str = "qwen2.5-coder:14b"
+    model: str = "deepseek-r1:14b"
     base_url: str = "http://localhost:11434"
     temperature: float = 0.2
     max_tokens: int = 4096

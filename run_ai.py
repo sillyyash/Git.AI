@@ -33,11 +33,15 @@ def run_ai_pipeline(root_dir=None):
     print(planner.plan_to_json(plan))
 
     # Coder
+    print("\n=== STARTING CODER ===")
     coder = create_coder()
     result = coder.execute(plan, repo, index, graph, relationship_graph)
+    print("\n=== CODER FINISHED ===")
+    print(result)
 
     # Print Change Objects
     for change in result.changes:
+        print(change)
         print(change.to_dict())
 
 
