@@ -229,7 +229,7 @@ class CoderConfig:
     base_url: str = "http://localhost:11434"
     temperature: float = 0.2
     max_tokens: int = 4096
-    timeout: float = 120.0
+    timeout: float = 300.0
     retries: int = 3
 
 
@@ -341,7 +341,7 @@ class CoderAgent:
         prompt = self._build_step_prompt(step, plan, repository, context)
         print("\n========== PROMPT ==========")
         print(f"Prompt length: {len(prompt):,} characters")
-        print(prompt[:1000])
+        print(prompt)
         print("...")
         print("========== CALLING MODEL ==========\n")
 
@@ -443,14 +443,29 @@ class CoderAgent:
     def _collect_numbered_content(
         self, repository: Repository, paths: List[str]
     ) -> Dict[str, str]:
+        print("\n===== DEBUG: NUMBERED CONTENT =====")
+        print("Planner affected_files:", paths)
+        print("Repository files:")
+        for f in repository.files:
+            print(" -", repr(f.path))
+        print("===================================\n")
+
         by_path = {f.path: f.content for f in repository.files}
         numbered: Dict[str, str] = {}
+
         for path in paths:
             content = by_path.get(path)
             if content is None:
+                print(f"[DEBUG] No match for: {path}")
                 continue
+
+            print(f"[DEBUG] Matched: {path}")
+
             lines = content.splitlines()
-            numbered[path] = "\n".join(f"{i + 1}\t{line}" for i, line in enumerate(lines))
+            numbered[path] = "\n".join(
+                f"{i + 1}\t{line}" for i, line in enumerate(lines)
+            )
+
         return numbered
 
     def _call_model(self, prompt: str) -> str:
@@ -555,6 +570,15 @@ class CoderAgent:
         symbol = entry.get("symbol")
         metadata = entry.get("metadata")
 
+        # Normalize paths
+        if isinstance(path, str):
+            path = path.replace("\\", "/")
+            path = path.lstrip("./")
+
+        if isinstance(target_path, str):
+            target_path = target_path.replace("\\", "/")
+            target_path = target_path.lstrip("./")
+
         if not isinstance(path, str) or not path:
             raise CoderExecutionError("change entry missing valid 'path'.")
         if operation not in VALID_OPERATIONS:
@@ -590,6 +614,31 @@ class CoderAgent:
             symbol=symbol,
             metadata=metadata,
         )
+    
+    def _deduplicate_changes(self, changes: List[Change]) -> List[Change]:
+        """Remove identical Change objects while preserving order."""
+
+        unique = []
+        seen = set()
+
+        for change in changes:
+            key = (
+                change.path,
+                change.operation,
+                change.start_line,
+                change.end_line,
+                change.content,
+                change.target_path,
+                change.symbol,
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            unique.append(change)
+
+        return unique
 
     def _merge_same_file_changes(self, changes: List[Change]) -> List[Change]:
         merged: List[Change] = []
