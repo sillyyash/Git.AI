@@ -237,9 +237,18 @@ class CoderAgent:
         )
 
         prompt = self._build_step_prompt(step, plan, repository, context)
-        response_text = self._call_model(prompt)
-        return self._parse_response(response_text, step)
+        print("\n========== PROMPT ==========")
+        print(f"Prompt length: {len(prompt):,} characters")
+        print(prompt[:1000])
+        print("...")
+        print("========== CALLING MODEL ==========\n")
 
+        response_text = self._call_model(prompt)
+
+        print("\n========== MODEL RETURNED ==========\n")
+
+        return self._parse_response(response_text, step)
+    
     def _build_step_prompt(
         self,
         step: ExecutionStep,
@@ -248,7 +257,7 @@ class CoderAgent:
         context: Dict[str, Any],
     ) -> str:
         base_prompt = build_prompt(
-            step.description,
+            plan.request,
             context,
             mode="coder",
             output_format="json",
@@ -256,10 +265,14 @@ class CoderAgent:
 
         sections: List[str] = [base_prompt, ""]
 
+        sections.append("Execution Context:")
+        sections.append(f"Original user request: {plan.request}")
         sections.append(f"Planner intent: {plan.intent.value}")
         sections.append(f"Planner summary: {plan.summary}")
         sections.append(f"Step id: {step.id}")
         sections.append(f"Step action: {step.action}")
+        sections.append(f"Step description: {step.description}")
+        sections.append("")
 
         if step.affected_files:
             sections.append("Files this step must operate on:")
@@ -269,18 +282,43 @@ class CoderAgent:
         if step.affected_symbols:
             sections.append("Symbols this step must operate on:")
             for symbol in step.affected_symbols:
-                sections.append(f"- {symbol.name} ({symbol.kind})" + (f" in {symbol.file}" if symbol.file else ""))
+                text = f"- {symbol.name} ({symbol.kind})"
+                if symbol.file:
+                    text += f" in {symbol.file}"
+                sections.append(text)
 
-        numbered_content = self._collect_numbered_content(repository, step.affected_files)
+        numbered_content = self._collect_numbered_content(
+            repository,
+            step.affected_files,
+        )
+
         if numbered_content:
-            sections.append("Existing file content (1-based line numbers):")
+            sections.append("")
+            sections.append("===== SOURCE CODE =====")
+
             for path, numbered in numbered_content.items():
-                sections.append(f"--- {path} ---")
+                sections.append(f"FILE: {path}")
+                sections.append("=" * 80)
                 sections.append(numbered)
+                sections.append("=" * 80)
+                sections.append(f"END FILE: {path}")
+                sections.append("")
 
         if step.validation:
             sections.append(f"Validation expectation: {step.validation}")
 
+        sections.append("")
+        sections.append("===== CODER RESPONSIBILITIES =====")
+        sections.append("You are the Coder Agent.")
+        sections.append("Your job is ONLY to propose Change objects.")
+        sections.append("Do NOT apply patches.")
+        sections.append("Do NOT validate whether files exist.")
+        sections.append("Do NOT validate line numbers.")
+        sections.append("Do NOT rewrite entire files unless explicitly requested.")
+        sections.append("Do NOT explain your reasoning.")
+        sections.append("Produce the minimal set of Change objects required.")
+        sections.append("Assume a Validator, Patch Generator, and Repository Writer will process your output.")
+        sections.append("Return ONLY valid JSON matching the required schema.")
         sections.append("")
         sections.append(CODER_OUTPUT_CONTRACT)
 
