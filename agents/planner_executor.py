@@ -196,6 +196,47 @@ def _steps_from_llm(raw_steps: List[Any], config: PlannerConfig) -> List[Executi
 # Phase 5: Heuristic execution plan generation (fallback path)
 # ---------------------------------------------------------------------------
 
+def _feature_action(request: str):
+    """Infer a more specific step id/action/description for FEATURE-intent
+    requests instead of always falling back to a generic 'implement_feature'.
+
+    Returns a (step_id, action, description) tuple. Callers are expected to
+    still attach their own `context` dict alongside this.
+    """
+    r = request.lower()
+
+    if "logging" in r:
+        return (
+            "prepare_logging",
+            "modify_function",
+            "Add logging to existing code",
+        )
+    if "create" in r or "implement" in r:
+        return (
+            "prepare_create",
+            "create_function",
+            "Create a new function or implementation",
+        )
+    if "endpoint" in r:
+        return (
+            "prepare_endpoint",
+            "create_endpoint",
+            "Create a new API endpoint",
+        )
+    if "class" in r:
+        return (
+            "prepare_class",
+            "create_class",
+            "Create a new class",
+        )
+
+    return (
+        "prepare_feature",
+        "implement_feature",
+        "Implement the requested feature",
+    )
+
+
 def generate_execution_plan(
     intent: Intent,
     request: str,
@@ -244,19 +285,110 @@ def generate_execution_plan(
         validation="Dependency analysis complete, no circular deps unhandled",
     ))
 
-    step_order += 1
+    feature_id, feature_action, feature_desc = _feature_action(request)
+
     intent_step_map = {
-        Intent.RENAME: ("prepare_rename", "prepare_refactoring", "Prepare rename operation with import updates",
-                        {"operation": "rename", "symbols_to_rename": [s.name for s in affected_symbols]}),
-        Intent.REFACTOR: ("prepare_refactor", "prepare_refactoring", "Prepare refactoring structure changes",
-                           {"operation": "refactor"}),
-        Intent.FEATURE: ("prepare_feature", "scaffold_feature", "Scaffold new feature structure and placeholders",
-                          {"operation": "feature"}),
-        Intent.DELETE: ("prepare_delete", "prepare_deletion", "Identify and prepare dead code removal",
-                         {"operation": "delete"}),
-        Intent.BUG: ("prepare_bugfix", "prepare_bugfix", "Prepare targeted bug fix",
-                     {"operation": "bugfix"}),
+        Intent.RENAME: (
+            "prepare_rename",
+            "rename_symbol",
+            "Rename symbols and update all references",
+            {
+                "operation": "rename",
+                "symbols_to_rename": [s.name for s in affected_symbols],
+            },
+        ),
+
+        Intent.MOVE: (
+            "prepare_move",
+            "move_symbol",
+            "Move symbols to another file and update imports",
+            {
+                "operation": "move",
+            },
+        ),
+
+        Intent.COPY: (
+            "prepare_copy",
+            "copy_symbol",
+            "Copy symbols to another location",
+            {
+                "operation": "copy",
+            },
+        ),
+
+        Intent.EXTRACT: (
+            "prepare_extract",
+            "extract_symbol",
+            "Extract code into a reusable function or module",
+            {
+                "operation": "extract",
+            },
+        ),
+
+        Intent.INLINE: (
+            "prepare_inline",
+            "inline_symbol",
+            "Inline symbols into their call sites",
+            {
+                "operation": "inline",
+            },
+        ),
+
+        Intent.SPLIT: (
+            "prepare_split",
+            "split_module",
+            "Split a file or module into smaller modules",
+            {
+                "operation": "split",
+            },
+        ),
+
+        Intent.MERGE: (
+            "prepare_merge",
+            "merge_modules",
+            "Merge related files or symbols",
+            {
+                "operation": "merge",
+            },
+        ),
+
+        Intent.REFACTOR: (
+            "prepare_refactor",
+            "refactor_code",
+            "Refactor code structure without changing behavior",
+            {
+                "operation": "refactor",
+            },
+        ),
+
+        Intent.FEATURE: (
+            feature_id,
+            feature_action,
+            feature_desc,
+            {
+                "operation": "feature",
+            },
+        ),
+
+        Intent.DELETE: (
+            "prepare_delete",
+            "delete_symbol",
+            "Remove unused or deprecated code",
+            {
+                "operation": "delete",
+            },
+        ),
+
+        Intent.BUG: (
+            "prepare_bugfix",
+            "fix_bug",
+            "Fix the reported bug",
+            {
+                "operation": "bugfix",
+            },
+        ),
     }
+    
     step_id, action, description, extra_context = intent_step_map.get(
         intent, (f"prepare_{intent.value}", "prepare_changes", f"Prepare changes for {intent.value} operation",
                  {"operation": intent.value})

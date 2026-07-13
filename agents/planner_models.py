@@ -15,22 +15,28 @@ from typing import Dict, List, Optional, Any
 
 
 class Intent(str, Enum):
-    """Classification of user intent for code operations.
-    
-    Used to determine strategy and complexity estimation.
-    """
     RENAME = "rename"
+    MOVE = "move"
+    COPY = "copy"
+    EXTRACT = "extract"
+    INLINE = "inline"
+    SPLIT = "split"
+    MERGE = "merge"
+
     REFACTOR = "refactor"
     FEATURE = "feature"
     BUG = "bug"
-    EXPLAIN = "explain"
     REVIEW = "review"
-    OPTIMIZE = "optimize"
+    EXPLAIN = "explain"
     DELETE = "delete"
     GENERATE = "generate"
     TEST = "test"
     DOCS = "docs"
+    OPTIMIZE = "optimize"
+
     UNKNOWN = "unknown"
+
+  
 
 
 class Risk(str, Enum):

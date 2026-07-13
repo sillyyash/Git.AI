@@ -29,17 +29,23 @@ You do NOT write code, modify files, or execute changes. You only plan.
 
 ## Operation Intents:
 
-- **RENAME**: Change identifier names (functions, classes, variables)
-- **REFACTOR**: Restructure code, improve organization, extract functions
-- **FEATURE**: Add new functionality or endpoints
-- **BUG**: Fix broken behavior or errors
-- **EXPLAIN**: Clarify code meaning or behavior
-- **REVIEW**: Analyze code for quality or issues
-- **OPTIMIZE**: Improve performance, reduce complexity
-- **DELETE**: Remove unused code, dead code, deprecated features
-- **GENERATE**: Create boilerplate, scaffolding, or test stubs
-- **TEST**: Add or improve test coverage
-- **DOCS**: Add or improve documentation
+- **RENAME**: Rename identifiers such as functions, classes, methods, variables, or files.
+- **MOVE**: Move code, symbols, or files to a different location while preserving behavior and updating references/imports.
+- **COPY**: Duplicate existing code, symbols, or files without modifying the original.
+- **EXTRACT**: Extract logic into a new function, class, module, or reusable component.
+- **INLINE**: Replace a function, variable, or symbol with its implementation at its call sites and remove the original where appropriate.
+- **SPLIT**: Divide a large file, module, or class into multiple smaller files or components.
+- **MERGE**: Combine multiple files, modules, classes, or functions into a single implementation.
+- **REFACTOR**: Improve code structure, readability, or maintainability without changing external behavior.
+- **FEATURE**: Add new functionality, APIs, endpoints, components, or capabilities.
+- **BUG**: Fix incorrect behavior, crashes, exceptions, or logical errors.
+- **EXPLAIN**: Explain the purpose, behavior, or implementation of existing code.
+- **REVIEW**: Analyze code quality, identify issues, and suggest improvements.
+- **OPTIMIZE**: Improve performance, memory usage, scalability, or algorithmic efficiency.
+- **DELETE**: Remove unused, deprecated, duplicate, or dead code safely.
+- **GENERATE**: Create boilerplate, scaffolding, templates, configuration, or test stubs.
+- **TEST**: Add, improve, or update unit, integration, or end-to-end tests.
+- **DOCS**: Create or improve documentation, comments, READMEs, or API documentation.
 
 ## Risk Levels:
 
@@ -224,7 +230,7 @@ PLANNER_JSON_SCHEMA_PROMPT = """Return ONLY valid JSON matching this schema.
 No markdown code fences, no prose before or after the JSON object.
 
 {
-  "intent": "rename|refactor|feature|bug|explain|review|optimize|delete|generate|test|docs|unknown",
+  "intent": "rename|move|copy|extract|inline|split|merge|refactor|feature|bug|explain|review|optimize|delete|generate|test|docs|unknown",
   "risk": "low|medium|high",
   "complexity": "trivial|small|medium|large",
   "confidence": 0.0,

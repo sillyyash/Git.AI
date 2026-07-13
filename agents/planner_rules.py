@@ -72,6 +72,42 @@ INTENT_KEYWORDS: Dict[Intent, List[str]] = {
         "add comment", "explain in docs", "document the", "readme",
         "api docs", "documentation",
     ],
+    Intent.MOVE: [
+    "move",
+    "relocate",
+    "transfer"
+    ],
+    Intent.COPY: [
+        "copy",
+        "duplicate",
+        "replicate"
+    ],
+    Intent.EXTRACT: [
+        "extract",
+        "pull out",
+        "separate"
+    ],
+    Intent.INLINE: [
+        "inline",
+        "embed",
+        "integrate"
+    ],
+    Intent.SPLIT: [
+        "split",
+        "divide",
+        "separate"
+    ],
+    Intent.MERGE: [
+        "merge",
+        "combine",
+        "unify"
+    ],
+    
+    
+
+
+
+
 }
 
 # Reverse index: keyword -> intents

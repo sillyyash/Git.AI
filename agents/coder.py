@@ -40,20 +40,48 @@ from agents.planner_models import Plan, ExecutionStep
 CODE_FENCE_RE = re.compile(r"^```[a-zA-Z0-9]*\n|\n```$", re.MULTILINE)
 
 VALID_OPERATIONS = {
-    "create",
-    "replace_region",
     "insert_before",
     "insert_after",
-    "delete_region",
-    "rename_symbol",
+    "replace_range",
+    "delete_range",
+    "create_file",
+    "delete_file",
     "move_symbol",
+    "rename_symbol",
+    "update_import",
 }
 
 REGION_OPERATIONS = {
-    "replace_region",
     "insert_before",
     "insert_after",
-    "delete_region",
+    "replace_range",
+    "delete_range",
+}
+
+# Operations that describe a whole-file or symbol-level change rather than a
+# specific line region. These may omit start_line/end_line and instead rely
+# on "symbol", "target_path", and/or "content" to fully describe the change.
+NON_REGION_OPERATIONS = {
+    "create_file",
+    "delete_file",
+    "move_symbol",
+    "rename_symbol",
+    "update_import",
+}
+
+# Semantic (business-rule) requirements per operation, enforced on top of the
+# base VALID_OPERATIONS / REGION_OPERATIONS checks, so malformed change
+# objects are rejected here instead of reaching the Patch Generator.
+# Each value is a list of fields that must be present and non-empty for that
+# operation. "metadata.new_name" is a special case handled as a nested
+# lookup rather than a top-level field.
+SEMANTIC_REQUIREMENTS: Dict[str, List[str]] = {
+    "move_symbol": ["path", "target_path", "symbol"],
+    "rename_symbol": ["path", "symbol", "metadata.new_name"],
+    "update_import": ["path", "content"],
+    "create_file": ["target_path", "content"],
+    "delete_file": ["path"],
+    "replace_range": ["start_line", "end_line", "content"],
 }
 
 CODER_OUTPUT_CONTRACT = (
@@ -67,21 +95,49 @@ CODER_OUTPUT_CONTRACT = (
     '  "changes": [\n'
     "    {\n"
     '      "path": "relative/path/to/file.ext",\n'
-    '      "operation": "create" | "replace_region" | "insert_before" | "insert_after" | "delete_region" | "rename_symbol" | "move_symbol",\n'
+    '      "operation": "insert_before" | "insert_after" | "replace_range" | "delete_range" | '
+    '"create_file" | "delete_file" | "move_symbol" | "rename_symbol" | "update_import",\n'
     '      "start_line": 1,\n'
     '      "end_line": 1,\n'
     '      "content": "...",\n'
+    '      "target_path": "relative/path/to/destination.ext",\n'
+    '      "symbol": "function_or_class_name",\n'
+    '      "metadata": {},\n'
     '      "reason": "planner_step"\n'
     "    }\n"
     "  ]\n"
     "}\n"
+    "Allowed operations and what each means:\n"
+    "- insert_before: insert \"content\" immediately before line \"start_line\" (end_line == start_line).\n"
+    "- insert_after: insert \"content\" immediately after line \"end_line\" (start_line == end_line).\n"
+    "- replace_range: replace lines \"start_line\" through \"end_line\" (inclusive) with \"content\".\n"
+    "- delete_range: delete lines \"start_line\" through \"end_line\" (inclusive); omit or empty \"content\".\n"
+    "- create_file: create a brand-new file. Set both \"path\" and \"target_path\" to the new file's "
+    "relative path, and put the full file contents in \"content\"; omit start_line/end_line.\n"
+    "- delete_file: delete the file at \"path\" entirely; omit start_line/end_line and \"content\".\n"
+    "- move_symbol: move the definition named in \"symbol\" out of \"path\" and into \"target_path\", "
+    "updating imports/references as needed; omit start_line/end_line unless region-scoped.\n"
+    "- rename_symbol: rename the definition named in \"symbol\" (old name) to the new name given in "
+    "metadata[\"new_name\"] (e.g. \"metadata\": {\"new_name\": \"sum_values\"}), updating the definition "
+    "and all references; omit start_line/end_line unless region-scoped.\n"
+    "- update_import: add, remove, or modify an import statement in \"path\", with the new import text "
+    "in \"content\"; omit start_line/end_line unless region-scoped.\n"
     "Rules:\n"
-    "- Never emit a full-file rewrite unless the operation is \"create\" for a new file.\n"
-    "- For existing files, emit the smallest possible region edit: replace_region, insert_before, "
-    "insert_after, or delete_region, using 1-based inclusive line numbers from the numbered content shown below.\n"
-    "- \"content\" holds only the new/changed code for that region, not the whole file.\n"
-    "- delete_region must omit or empty \"content\".\n"
-    "- rename_symbol and move_symbol may omit start_line/end_line if not region-scoped; describe the change fully in \"content\" and \"reason\".\n"
+    "- Never emit a full-file rewrite unless the operation is \"create_file\" for a new file.\n"
+    "- For existing files, emit the smallest possible edit using insert_before, insert_after, "
+    "replace_range, or delete_range, with 1-based inclusive line numbers from the numbered content shown below.\n"
+    "- \"content\" holds only the new/changed code for that region, not the whole file (except for create_file).\n"
+    "- delete_range and delete_file must omit or empty \"content\".\n"
+    "- Choose the operation that matches the user's actual intent: use create_file for a brand-new file "
+    "instead of insert_after into an unrelated file, use move_symbol instead of a delete+create pair when "
+    "relocating a definition, and use rename_symbol instead of replace_range when only a name is changing.\n"
+    "- \"target_path\", \"symbol\", and \"metadata\" are optional and only apply to certain operations "
+    "(see above); omit them when not relevant instead of setting them to null.\n"
+    "- Each operation has required fields that will be rejected as invalid if missing: move_symbol needs "
+    "\"path\", \"target_path\", and \"symbol\"; rename_symbol needs \"path\", \"symbol\", and "
+    "metadata[\"new_name\"]; update_import needs \"path\" and \"content\"; create_file needs \"target_path\" "
+    "and \"content\"; delete_file needs \"path\"; replace_range needs \"start_line\", \"end_line\", and "
+    "\"content\".\n"
     "- If multiple edits land in the same file, merge adjacent or overlapping regions into a single change object.\n"
     "- Preserve all unchanged code by omitting it entirely; do not restate untouched lines.\n"
     "- Match existing formatting, indentation, naming, typing, docstring style, logging, and import ordering exactly.\n"
@@ -90,16 +146,62 @@ CODER_OUTPUT_CONTRACT = (
     "- If a step cannot be completed as specified, set \"status\" to \"failed\" and explain in \"errors\"; do not invent a workaround."
 )
 
+OPERATION_SELECTION_GUIDE = (
+    "Operation selection — prefer semantic operations over text edits whenever one applies. "
+    "Only fall back to insert_before, insert_after, replace_range, or delete_range when no semantic "
+    "operation below matches the intent.\n"
+    "- \"Move add() to utils.py\" -> operation \"move_symbol\": symbol \"add\", path is the current file, "
+    "target_path \"utils.py\".\n"
+    "- \"Create utils.py\" / \"Create a new file for the math helpers\" -> operation \"create_file\": "
+    "path and target_path both set to the new file's path, full contents in \"content\".\n"
+    "- \"Rename add() to sum_values()\" -> operation \"rename_symbol\": symbol \"add\", "
+    "metadata {\"new_name\": \"sum_values\"}.\n"
+    "- \"Update the imports in app.py\" / \"Import multiply from utils\" -> operation \"update_import\": "
+    "the new import statement(s) go in \"content\".\n"
+    "- \"Delete utils.py\" / \"Remove the unused helper file\" -> operation \"delete_file\".\n"
+    "- A small in-place text change with no matching semantic operation above (e.g. tweaking a condition, "
+    "adding a log line inside an existing function) -> insert_before, insert_after, replace_range, or "
+    "delete_range, whichever is smallest.\n"
+)
+
+LINE_NUMBER_RULES = (
+    "Line Number Rules:\n"
+    "- Use the 1-based line numbers shown in the numbered source code above.\n"
+    "- Never guess line numbers.\n"
+    "- If modifying existing code, use the exact line numbers from the numbered source.\n"
+    "- If creating a new file, leave start_line and end_line as null.\n"
+    "- If moving or renaming a symbol, specify the symbol name (\"symbol\") instead of guessing line numbers; "
+    "leave start_line and end_line as null unless the change is also region-scoped.\n"
+)
+
 
 @dataclass
 class Change:
-    """A single minimal, region-scoped repository change."""
+    """
+    A single repository edit produced by the Coder Agent.
+
+    The Patch Generator is responsible for applying these changes.
+    """
+    # Target file
     path: str
+
+    # Operation type
     operation: str
+
+    # Why this exists
     reason: str
+
+    # Region affected
     start_line: Optional[int] = None
     end_line: Optional[int] = None
+
+    # New content
     content: str = ""
+
+    # Optional metadata
+    target_path: Optional[str] = None
+    symbol: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -316,9 +418,23 @@ class CoderAgent:
         sections.append("Do NOT validate line numbers.")
         sections.append("Do NOT rewrite entire files unless explicitly requested.")
         sections.append("Do NOT explain your reasoning.")
+        sections.append("Prefer semantic operations over text edits whenever one applies:")
+        sections.append("- Use move_symbol for moving a function, class, or module to another file.")
+        sections.append("- Use rename_symbol for renaming an identifier.")
+        sections.append("- Use update_import for adding, removing, or changing import statements.")
+        sections.append("- Use create_file when a step requires a brand-new file.")
+        sections.append("- Use delete_file when a step requires removing an entire file.")
+        sections.append(
+            "Use insert_before, insert_after, replace_range, or delete_range only when no semantic "
+            "operation applies."
+        )
         sections.append("Produce the minimal set of Change objects required.")
         sections.append("Assume a Validator, Patch Generator, and Repository Writer will process your output.")
         sections.append("Return ONLY valid JSON matching the required schema.")
+        sections.append("")
+        sections.append(OPERATION_SELECTION_GUIDE)
+        sections.append("")
+        sections.append(LINE_NUMBER_RULES)
         sections.append("")
         sections.append(CODER_OUTPUT_CONTRACT)
 
@@ -371,6 +487,60 @@ class CoderAgent:
 
         return changes
 
+    def _check_semantic_requirements(
+        self,
+        operation: str,
+        path: str,
+        content: str,
+        start_line: Optional[int],
+        end_line: Optional[int],
+        target_path: Optional[str],
+        symbol: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """Enforce the SEMANTIC_REQUIREMENTS table for `operation`.
+
+        This is business-rule validation on top of the structural checks
+        already done in _validate_change_entry (valid operation, correct
+        field types, integer line ranges). It exists so a malformed
+        semantic operation (e.g. a move_symbol with no target_path) is
+        rejected here rather than silently reaching the Patch Generator.
+        """
+        required_fields = SEMANTIC_REQUIREMENTS.get(operation)
+        if not required_fields:
+            return
+
+        values: Dict[str, Any] = {
+            "path": path,
+            "target_path": target_path,
+            "symbol": symbol,
+            "content": content,
+            "start_line": start_line,
+            "end_line": end_line,
+        }
+
+        for field_name in required_fields:
+            if field_name == "metadata.new_name":
+                new_name = (metadata or {}).get("new_name")
+                if not isinstance(new_name, str) or not new_name.strip():
+                    raise CoderExecutionError(
+                        f"'{operation}' change for '{path}' requires metadata[\"new_name\"]."
+                    )
+                continue
+
+            value = values.get(field_name)
+            if value is None:
+                missing = True
+            elif isinstance(value, str):
+                missing = not value.strip()
+            else:
+                missing = False
+
+            if missing:
+                raise CoderExecutionError(
+                    f"'{operation}' change for '{path}' requires '{field_name}'."
+                )
+
     def _validate_change_entry(self, entry: Any, step: ExecutionStep) -> Change:
         if not isinstance(entry, dict):
             raise CoderExecutionError("each change entry must be an object.")
@@ -381,13 +551,20 @@ class CoderAgent:
         reason = entry.get("reason") or step.id
         start_line = entry.get("start_line")
         end_line = entry.get("end_line")
+        target_path = entry.get("target_path")
+        symbol = entry.get("symbol")
+        metadata = entry.get("metadata")
 
         if not isinstance(path, str) or not path:
             raise CoderExecutionError("change entry missing valid 'path'.")
         if operation not in VALID_OPERATIONS:
             raise CoderExecutionError(f"change entry '{path}' has invalid operation: {operation}")
-        if operation == "create" and not content.strip():
-            raise CoderExecutionError(f"'create' change for '{path}' has empty content.")
+        if target_path is not None and not isinstance(target_path, str):
+            raise CoderExecutionError(f"change entry '{path}' has non-string 'target_path'.")
+        if symbol is not None and not isinstance(symbol, str):
+            raise CoderExecutionError(f"change entry '{path}' has non-string 'symbol'.")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise CoderExecutionError(f"change entry '{path}' has non-object 'metadata'.")
         if operation in REGION_OPERATIONS:
             if not isinstance(start_line, int) or not isinstance(end_line, int):
                 raise CoderExecutionError(
@@ -395,8 +572,12 @@ class CoderAgent:
                 )
             if start_line < 1 or end_line < start_line:
                 raise CoderExecutionError(f"'{operation}' change for '{path}' has invalid line range.")
-        if operation == "delete_region" and content.strip():
+        if operation in {"delete_range", "delete_file"} and content.strip():
             content = ""
+
+        self._check_semantic_requirements(
+            operation, path, content, start_line, end_line, target_path, symbol, metadata
+        )
 
         return Change(
             path=path,
@@ -405,6 +586,9 @@ class CoderAgent:
             start_line=start_line if isinstance(start_line, int) else None,
             end_line=end_line if isinstance(end_line, int) else None,
             content=content,
+            target_path=target_path,
+            symbol=symbol,
+            metadata=metadata,
         )
 
     def _merge_same_file_changes(self, changes: List[Change]) -> List[Change]:
