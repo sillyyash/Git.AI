@@ -467,15 +467,38 @@ def create_plan(
     missing_information: List[str] = []
     clarification_questions: List[str] = []
 
-    if intent_result.intent == Intent.UNKNOWN or intent_result.confidence < config.clarification_threshold:
-        missing_information.append("Intent could not be classified confidently from the request text.")
+    # Don't force clarification for feature requests simply because the
+    # classifier confidence is low.
+    if (
+        intent_result.intent == Intent.UNKNOWN
+        or (
+            intent_result.intent != Intent.FEATURE
+            and intent_result.confidence < config.clarification_threshold
+        )
+    ): 
+        missing_information.append(
+             "Intent could not be classified confidently from the request text."
+        )
         clarification_questions.append(
-            "Could you clarify the type of change you want (rename, add a feature, fix a bug, etc.)?"
+             "Could you clarify the type of change you want (rename, add a feature, fix a bug, etc.)?"
         )
 
-    if not affected_symbols and not affected_files:
-        missing_information.append("No matching symbols or files were found in the repository for this request.")
-        clarification_questions.append("Which file(s) or symbol(s) should this change involve?")
+    # Existing symbols/files are required for operations that modify code.
+    # Feature creation is allowed even when the symbol does not yet exist.
+    if (
+        intent_result.intent 
+        not in {
+            Intent.FEATURE,
+        }
+        and not affected_symbols
+        and not affected_files
+    ):
+        missing_information.append(
+            "No matching symbols or files were found in the repository for this request."
+        )
+        clarification_questions.append(
+           "Which file(s) or symbol(s) should this change involve?"
+        )
 
     if clarification_questions:
         return Plan(
