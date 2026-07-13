@@ -306,6 +306,7 @@ class CoderAgent:
                 if self.debug:
                     print(f"[coder] step {step.id} failed: {exc}")
 
+        all_changes = self._deduplicate_changes(all_changes)
         merged_changes = self._merge_same_file_changes(all_changes)
 
         summary = (
