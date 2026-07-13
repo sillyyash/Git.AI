@@ -180,3 +180,17 @@ When a design issue is discovered:
 Do not make speculative changes.
 
 Ask questions only if information is actually missing.
+
+## Repository Analysis Rules
+
+Never assume the architecture from documentation alone.
+
+Before answering architectural questions:
+
+- inspect the actual source files
+- trace imports
+- trace function calls
+- identify execution flow
+- reference concrete filenames, classes, and functions
+
+If documentation and source disagree, trust the source code.
